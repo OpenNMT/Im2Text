@@ -177,7 +177,7 @@ function run(model, phase, batchSize, numEpochs, trainData, valData, modelDir, s
       os.execute(string.format('cp %s %s', modelPath, modelPathTemp))
       os.execute(string.format('mv %s %s', modelPathTemp, modelPathLatest))
     else -- isForwardOnly == true
-      logger:info('Epoch ends. Number of samples: %d.', epoch, numSamples)
+      logger:info('Epoch ends. Number of samples: %d.', numSamples)
     end
   end -- for epoch
 end -- run function
