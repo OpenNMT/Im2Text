@@ -131,7 +131,7 @@ function model:_build()
   -- create criterion
   self.criterion = nn.ParallelCriterion(false)
   local weights = torch.ones(self.config.targetVocabSize)
-  weights[1] = 0
+  weights[onmt.Constants.PAD] = 0
   local nll = nn.ClassNLLCriterion(weights)
   nll.sizeAverage = false
   self.criterion:add(nll)
