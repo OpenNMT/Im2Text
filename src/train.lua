@@ -165,7 +165,7 @@ function run(model, phase, batchSize, numEpochs, trainData, valData, modelDir, s
       logger:info('Epoch: %d. Step: %d. Val Accuracy: %f. Val Perplexity: %f', epoch, model.numSteps, valNumCorrect/valNumSamples, math.exp(valLoss/valNumNonzeros))
       -- Decay learning rate if validation loss does not decrease
       if valLosses[epoch-1] and valLosses[epoch] > valLosses[epoch-1] then
-        model.optimState.learningRate = model.optimState.learningRate*lrDecay
+        model.optimState.learningRate = model.optimState.learningRate * learningRateDecay
         logger:info('Decay learning rate to %f', model.optimState.learningRate)
       end
       logger:info('Saving Model')
