@@ -229,7 +229,6 @@ function model:step(inputBatch, isForwardOnly, beamSize)
     targetIn = targetInput:transpose(1,2)
     targetOut = targetOutput:transpose(1,2)
     local cnnOutputs = self.cnn:forward(images) -- list of (batchSize, featureMapWidth, cnnFeatureSize)
-    local counter = 1
     local featureMapHeight = #cnnOutputs
     local featureMapWidth = cnnOutputs[1]:size(2)
     local context = self.contextProto[{{1, batchSize}, {1, featureMapHeight * featureMapWidth}}]
@@ -246,7 +245,7 @@ function model:step(inputBatch, isForwardOnly, beamSize)
       local encoderBatch = Batch():setSourceInput(source)
       local _, rowContext = self.encoder:forward(encoderBatch)
       for t = 1, featureMapWidth do
-        index = (i - 1) * featureMapHeight + t
+        local index = (i - 1) * featureMapWidth + t
         context[{{}, index, {}}]:copy(rowContext[{{}, t+1, {}}])
       end
     end
