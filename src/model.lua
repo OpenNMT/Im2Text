@@ -376,7 +376,7 @@ function model:step(inputBatch, isForwardOnly, beamSize)
       -- cnn
       cnnGrad = cnnGrad:split(1, 1)
       for i = 1, #cnnGrad do
-      cnnGrad[i] = cnnGrad[i]:contiguous():view(batchSize, featureMapWidth, -1)
+        cnnGrad[i] = cnnGrad[i]:contiguous():view(batchSize, featureMapWidth, -1)
       end
       self.cnn:backward(images, cnnGrad)
       collectgarbage()
