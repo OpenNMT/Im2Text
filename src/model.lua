@@ -24,6 +24,7 @@ function model:setOutputDirectory(outputDir)
     os.exit(1)
   end
   self.outputFile = outputFile
+  self.outputPath = outputPath
 end
 
 -- load model from model_path
@@ -409,6 +410,6 @@ end
 function model:shutdown()
   if self.outputFile then
     self.outputFile:close()
-    logger:info('Results saved to %s.', outputPath)
+    logger:info('Results saved to %s.', self.outputPath)
   end
 end
