@@ -589,7 +589,7 @@ function model:save(modelPath)
 end
 
 -- destructor
-function model:shutdown()
+function model:shutDown()
   if self.outputFile then
     self.outputFile:close()
     logger:info('Results saved to %s.', self.outputPath)

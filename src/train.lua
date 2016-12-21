@@ -248,8 +248,8 @@ function main()
   -- Run Model
   run(model, opt.phase, opt.batch_size, opt.num_epochs, trainData, valData, opt.model_dir, opt.steps_per_checkpoint, opt.beam_size, opt.output_dir, opt.learning_rate, opt.lr_decay)
 
-  model:shutdown()
-  logger:shutdown()
+  model:shutDown()
+  logger:shutDown()
 end -- function main
 
 main()
