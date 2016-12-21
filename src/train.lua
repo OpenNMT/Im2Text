@@ -21,7 +21,6 @@ tds = require 'tds'
 
 require 'src.model'
 require 'src.data'
-require 'src.log'
 
 cmd = torch.CmdLine()
 
@@ -185,7 +184,7 @@ end -- run function
 function main()
   assert (opt.gpu_id > 0, 'Only support using GPU! Please specify a valid gpu_id.')
 
-  logger = logging(opt.log_path)
+  logger = onmt.utils.Logger.new(opt.log_path)
   logger:info('Command Line Arguments: %s', table.concat(arg, ' ') or '')
 
   local gpuId = opt.gpu_id
