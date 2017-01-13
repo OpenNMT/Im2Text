@@ -6,12 +6,12 @@ require 'cunn'
 require 'cutorch'
 require 'cudnn'
 require 'paths'
-local status, err = pcall(function() require('onmt') end)
+local status = pcall(function() require('onmt') end)
 if not status then
   print('OpenNMT not found. Please enter the path to OpenNMT: ')
   local onmtPath = io.read()
   package.path = package.path .. ';' .. paths.concat(onmtPath, '?.lua')
-  status, err = pcall(function() require('onmt.init') end)
+  status = pcall(function() require('onmt.init') end)
   if not status then
     print ('Error: onmt not found in the specified path!')
     os.exit(1)
@@ -22,7 +22,7 @@ tds = require 'tds'
 require 'src.model'
 require 'src.data'
 
-cmd = torch.CmdLine()
+local cmd = torch.CmdLine()
 
 -- Input and Output
 cmd:text('')
@@ -111,7 +111,7 @@ local function run(model, phase, batchSize, numEpochs, trainData, valData, model
     end
     -- Run 1 epoch
     while true do
-      trainBatch = trainData:nextBatch(batchSize)
+      local trainBatch = trainData:nextBatch(batchSize)
       if trainBatch == nil then
         break
       end

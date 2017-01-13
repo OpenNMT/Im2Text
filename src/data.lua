@@ -1,4 +1,4 @@
- --[[ Load data. Adapted from https://github.com/da03/Attention-OCR/blob/master/src/data_util/data_gen.py. 
+ --[[ Load data. Adapted from https://github.com/da03/Attention-OCR/blob/master/src/data_util/data_gen.py.
  --  ARGS:
      * `imageDir`       : string. The base directory of the image path in dataPath.
      * `dataPath`       : string. The file containing data file names and label indexes. Format per line: imagePath[Space]labelIndex. Note that the imagePath is the relative path to imageDir. LabelIndex counts from 0.
@@ -22,7 +22,7 @@ function DataLoader:__init(imageDir, dataPath, labelPath, maxImageHeight, maxIma
   self.maxNumTokens = maxNumTokens or math.huge
 
   local file, err = io.open(dataPath, "r")
-  if err then 
+  if err then
     file, err = io.open(paths.concat(imageDir, dataPath), "r")
     if err then
       _G.logger:error('Data file %s not found', dataPath)
@@ -102,8 +102,8 @@ function DataLoader:nextBatch(batchSize)
           for i = 1, #self.buffer[imageWidth][imageHeight] do
             numNonzeros = numNonzeros + #self.buffer[imageWidth][imageHeight][i][2] - 1
             for j = 1, #self.buffer[imageWidth][imageHeight][i][2]-1 do
-              targetInput[i][j] = self.buffer[imageWidth][imageHeight][i][2][j] 
-              targetOutput[i][j] = self.buffer[imageWidth][imageHeight][i][2][j+1] 
+              targetInput[i][j] = self.buffer[imageWidth][imageHeight][i][2][j]
+              targetOutput[i][j] = self.buffer[imageWidth][imageHeight][i][2][j+1]
             end
           end
           self.buffer[imageWidth][imageHeight] = nil
@@ -121,16 +121,16 @@ function DataLoader:nextBatch(batchSize)
     collectgarbage()
     return nil
   end
-  local imageWidth, v = next(self.buffer)
+  local imageWidth = next(self.buffer)
   while next(self.buffer[imageWidth]) == nil do
     if next(self.buffer, imageWidth) == nil then
       self.cursor = 1
       collectgarbage()
       return nil
     end
-    imageWidth, v = next(self.buffer, imageWidth)
+    imageWidth = next(self.buffer, imageWidth)
   end
-  local imageHeight, v = next(self.buffer[imageWidth], nil) 
+  local imageHeight = next(self.buffer[imageWidth], nil)
   local actualBatchSize = #self.buffer[imageWidth][imageHeight] -- actual batch size is smaller than batchSize
   local images = torch.Tensor(actualBatchSize, 1, imageHeight, imageWidth)
   local maxTargetLength = -math.huge
@@ -146,8 +146,8 @@ function DataLoader:nextBatch(batchSize)
   for i = 1, #self.buffer[imageWidth][imageHeight] do
     numNonzeros = numNonzeros + #self.buffer[imageWidth][imageHeight][i][2] - 1
     for j = 1, #self.buffer[imageWidth][imageHeight][i][2]-1 do
-      targetInput[i][j] = self.buffer[imageWidth][imageHeight][i][2][j] 
-      targetOutput[i][j] = self.buffer[imageWidth][imageHeight][i][2][j+1] 
+      targetInput[i][j] = self.buffer[imageWidth][imageHeight][i][2][j]
+      targetOutput[i][j] = self.buffer[imageWidth][imageHeight][i][2][j+1]
     end
   end
   self.buffer[imageWidth][imageHeight] = nil
@@ -157,10 +157,10 @@ end
 -- convert labelIndex to a list of token ids
 function labelIndexToTokenIds(labelIndex, labelPath)
   assert (_G.idToVocab, '_G.idToVocab must be ready before calling labelIndexToTokenIds')
-  if vocabToId == nil then
-    vocabToId = tds.Hash()
+  if _G.vocabToId == nil then
+    _G.vocabToId = tds.Hash()
     for i = 1, #_G.idToVocab do
-      vocabToId[_G.idToVocab[i]] = i+4
+      _G.vocabToId[_G.idToVocab[i]] = i+4
     end
   end
   if labelLines == nil then
@@ -186,8 +186,8 @@ function labelIndexToTokenIds(labelIndex, labelPath)
   end
   for i = 1, #tokens do
     local token = tokens[i]
-    if vocabToId[token] then
-      tokenIds[#tokenIds+1] = vocabToId[token]
+    if _G.vocabToId[token] then
+      tokenIds[#tokenIds+1] = _G.vocabToId[token]
     else
       tokenIds[#tokenIds+1] = onmt.Constants.UNK -- unknown token
     end
@@ -259,8 +259,8 @@ function string.levenshtein(str1, str2)
   local len1 = string.len(str1)
   local len2 = string.len(str2)
   local matrix = {}
-  local cost = 0
-  
+  local cost
+
   -- quick cut-offs to save time
   if (len1 == 0) then
     return len2
@@ -269,7 +269,7 @@ function string.levenshtein(str1, str2)
   elseif (str1 == str2) then
     return 0
   end
-  
+
   -- initialise the base matrix values
   for i = 0, len1, 1 do
     matrix[i] = {}
@@ -278,7 +278,7 @@ function string.levenshtein(str1, str2)
   for j = 0, len2, 1 do
     matrix[0][j] = j
   end
-  
+
   -- actual Levenshtein algorithm
   for i = 1, len1, 1 do
     for j = 1, len2, 1 do
@@ -290,7 +290,7 @@ function string.levenshtein(str1, str2)
       matrix[i][j] = math.min(matrix[i-1][j] + 1, matrix[i][j-1] + 1, matrix[i-1][j-1] + cost)
     end
   end
-  
+
   -- return the last value - this is the Levenshtein distance
   return matrix[len1][len2]
 end

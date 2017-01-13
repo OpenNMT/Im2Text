@@ -19,7 +19,7 @@ function model:setOutputDirectory(outputDir)
   end
   local outputPath = paths.concat(outputDir, 'results.txt')
   local outputFile, err = io.open(outputPath, "w")
-  if err then 
+  if err then
     _G.logger:error('Output file %s cannot be created', outputPath)
     os.exit(1)
   end
@@ -32,14 +32,14 @@ function model:load(modelPath, config)
   assert(paths.filep(modelPath), string.format('Model file %s does not exist!', modelPath))
 
   local checkpoint = torch.load(modelPath)
-  local model, modelConfig = checkpoint[1], checkpoint[2]
-  self.cnn = model[1]:double()
-  self.encoder = onmt.BiEncoder.load(model[2])
-  self.decoder = onmt.Decoder.load(model[3])
-  self.posEmbeddingFw, self.posEmbeddingBw = model[4]:double(), model[5]:double()
+  local loadedModel, modelConfig = checkpoint[1], checkpoint[2]
+  self.cnn = loadedModel[1]:double()
+  self.encoder = onmt.BiEncoder.load(loadedModel[2])
+  self.decoder = onmt.Decoder.load(loadedModel[3])
+  self.posEmbeddingFw, self.posEmbeddingBw = loadedModel[4]:double(), loadedModel[5]:double()
   self.numSteps = checkpoint[3]
   self.optimState = checkpoint[4]
-  idToVocab = checkpoint[5] -- idToVocab is global
+  _G.idToVocab = checkpoint[5] -- _G.idToVocab is global
 
   -- Load model structure parameters
   self.config = {}
@@ -49,7 +49,7 @@ function model:load(modelPath, config)
   self.config.encoderNumLayers = modelConfig.encoderNumLayers
   self.config.decoderNumHidden = self.config.encoderNumHidden * 2 -- the decoder rnn size is the same as the output size of biEncoder
   self.config.decoderNumLayers = modelConfig.decoderNumLayers
-  self.config.targetVocabSize = #idToVocab + 4
+  self.config.targetVocabSize = #_G.idToVocab + 4
   self.config.targetEmbeddingSize = modelConfig.targetEmbeddingSize
   self.config.inputFeed = modelConfig.inputFeed
 
@@ -174,7 +174,6 @@ function model:step(inputBatch, isForwardOnly, beamSize)
     beamSize = math.min(beamSize, self.config.targetVocabSize)
     if not self.initBeam then
       self.initBeam = true
-      local beamDecoderInitState = onmt.utils.Cuda.convert(torch.zeros(self.config.batchSize*beamSize, self.config.decoderNumHidden))
       self.beamScores = onmt.utils.Cuda.convert(torch.zeros(self.config.batchSize, beamSize))
       self.currentIndicesHistory = {}
       self.beamParentsHistory = {}
@@ -229,9 +228,9 @@ function model:step(inputBatch, isForwardOnly, beamSize)
   end
 
   -- given parameters, evaluate loss (and optionally calculate gradients)
-  local feval = function(p)
-    targetIn = targetInput:transpose(1,2)
-    targetOut = targetOutput:transpose(1,2)
+  local feval = function()
+    local targetIn = targetInput:transpose(1,2)
+    local targetOut = targetOutput:transpose(1,2)
     local cnnOutputs = self.cnn:forward(images) -- list of (batchSize, featureMapWidth, cnnFeatureSize)
     local featureMapHeight = #cnnOutputs
     local featureMapWidth = cnnOutputs[1]:size(2)
@@ -323,13 +322,13 @@ function model:step(inputBatch, isForwardOnly, beamSize)
     end
 
     -- evaluate loss (and optionally do backward)
-    local loss, numCorrect = 0.0, 0.0
+    local loss, numCorrect
+    numCorrect = 0
     if isForwardOnly then
       -- final decoding
       local predTarget = onmt.utils.Cuda.convert(torch.zeros(batchSize, targetLength)):fill(onmt.Constants.PAD)
-      local predScores, indices = torch.max(self.beamScores[{{1, batchSize},{}}], 2) -- (batchSize, 1)
+      local _, indices = torch.max(self.beamScores[{{1, batchSize},{}}], 2) -- (batchSize, 1)
       indices = onmt.utils.Cuda.convert(indices:double())
-      predScores = predScores:view(-1) -- batchSize
       indices = indices:view(-1) -- batchSize
       local currentIndices = self.currentIndicesHistory[#self.currentIndicesHistory]:view(-1):index(1, indices + onmt.utils.Cuda.convert(torch.range(0, (batchSize - 1) * beamSize, beamSize):long())) -- batchSize
       for t = targetLength, 1, -1 do
@@ -368,7 +367,7 @@ function model:step(inputBatch, isForwardOnly, beamSize)
         source = torch.cat(posEmbeddingFw, source, 1)
         source = torch.cat(source, posEmbeddingBw, 1) -- (featureMapWidth + 2, batchSize, cnnFeatureSize)
         local encoderBatch = Batch():setSourceInput(source)
-        local _, rowContext = self.encoder:forward(encoderBatch)
+        self.encoder:forward(encoderBatch)
         local rowContextGrad = self.encoder:backward(encoderBatch, nil, gradContext:select(2,i))
         for t = 1, featureMapWidth do
           cnnGrad[{i, {}, t, {}}]:copy(rowContextGrad[t + 1])
@@ -397,7 +396,7 @@ function model:step(inputBatch, isForwardOnly, beamSize)
     return loss * batchSize, stats
   else
     local loss, _, stats = feval(self.params)
-    return loss * batchSize, stats 
+    return loss * batchSize, stats
   end
 end
 
@@ -419,7 +418,7 @@ function model:_optimizeMemory()
   decOutputs = onmt.utils.Tensor.recursiveClone(decOutputs)
   local _, gradContext = self.decoder:backward(batch, decOutputs, self.criterion)
   self.encoder:backward(batch, nil, gradContext)
- 
+
   local sharedSize, totSize = memoryOptimizer:optimize()
   _G.logger:info(' * sharing %d%% of output/gradInput tensors memory between clones', (sharedSize / totSize)*100)
 end
@@ -429,7 +428,7 @@ function model:save(modelPath)
   for i = 1, #self.layers do
     self.layers[i]:clearState()
   end
-  torch.save(modelPath, {{self.cnn, self.encoder:serialize(), self.decoder:serialize(), self.posEmbeddingFw, self.posEmbeddingBw}, self.config, self.numSteps, self.optimState, idToVocab})
+  torch.save(modelPath, {{self.cnn, self.encoder:serialize(), self.decoder:serialize(), self.posEmbeddingFw, self.posEmbeddingBw}, self.config, self.numSteps, self.optimState, _G.idToVocab})
 end
 
 -- destructor

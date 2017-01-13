@@ -16,7 +16,7 @@ The paper (http://arxiv.org/pdf/1609.04938v1.pdf) provides more technical detail
 
 ## Installation
 
-Im2Text is built on top of <a href="https://opennmt.github.io/">OpenNMT</a>. You can either install it as a package by `luarocks install --local https://raw.githubusercontent.com/OpenNMT/OpenNMT/master/rocks/opennmt-scm-1.rockspec` or provide the path to <a href="https://opennmt.github.io/">OpenNMT</a> at run time. It also depends on `tds`, `class`, `cudnn` and `cutorch`. Currently we only support **GPU**.
+Im2Text is built on top of <a href="https://opennmt.github.io/">OpenNMT</a>. You can either install it as a package by `luarocks install --local https://raw.githubusercontent.com/OpenNMT/OpenNMT/master/rocks/opennmt-scm-1.rockspec` or provide the path to <a href="https://opennmt.github.io/">OpenNMT</a> at run time. It also depends on `tds`, `class`, `cudnn`, `cutorch` and `paths`. Currently we only support **GPU**.
 
 
 ## Quick Start
