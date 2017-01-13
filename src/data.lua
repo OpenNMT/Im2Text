@@ -25,7 +25,7 @@ function DataLoader:__init(imageDir, dataPath, labelPath, maxImageHeight, maxIma
   if err then 
     file, err = io.open(paths.concat(imageDir, dataPath), "r")
     if err then
-      logger:error('Data file %s not found', dataPath)
+      _G.logger:error('Data file %s not found', dataPath)
       os.exit()
     end
   end
@@ -34,7 +34,7 @@ function DataLoader:__init(imageDir, dataPath, labelPath, maxImageHeight, maxIma
   for line in file:lines() do
     idx = idx + 1
     if idx % 1000000 == 0 then
-      logger:info ('%d lines read', idx)
+      _G.logger:info ('%d lines read', idx)
     end
     local imagePath, label = unpack(line:split('[%s]+'))
     self.lines[idx] = tds.Vec({imagePath, label})
@@ -62,7 +62,7 @@ function DataLoader:nextBatch(batchSize)
     local status, imageData = pcall(image.load, paths.concat(self.imageDir, imagePath))
     if not status then
       self.cursor = self.cursor + 1
-      logger:warning('Fails to read image file %s', imagePath)
+      _G.logger:warning('Fails to read image file %s', imagePath)
     else
       local labelIndex = self.lines[self.cursor][2]
       local tokenIds = labelIndexToTokenIds(labelIndex, self.labelPath)
@@ -70,7 +70,7 @@ function DataLoader:nextBatch(batchSize)
       imageData = 255.0*image.rgb2y(imageData) -- convert to greyscale
       local imageHeight, imageWidth = imageData:size(2), imageData:size(3)
       if #tokenIds > self.maxNumTokens + 2 then -- truncate target sequence
-        logger:warning('Image %s\'s target sequence is too long, will be truncated. Consider using a larger maxNumTokens', imagePath)
+        _G.logger:warning('Image %s\'s target sequence is too long, will be truncated. Consider using a larger maxNumTokens', imagePath)
         local tokenIdsTemp = {}
         for i = 1, self.maxNumTokens + 2 do
           tokenIdsTemp[i] = tokenIds[i]
@@ -110,7 +110,7 @@ function DataLoader:nextBatch(batchSize)
           do return {images, targetInput, targetOutput, numNonzeros, imagePaths} end
         end
       else --  not (imageHeight <= self.maxImageHeight and imageWidth <= self.maxImageWidth)
-        logger:warning('Image %s is too large, will be ignored. Consider using a larger maxImageWidth or maxImageHeight'%imagePath)
+        _G.logger:warning('Image %s is too large, will be ignored. Consider using a larger maxImageWidth or maxImageHeight'%imagePath)
       end
     end
   end -- cannot accumulate batchSize samples
@@ -156,11 +156,11 @@ end
 
 -- convert labelIndex to a list of token ids
 function labelIndexToTokenIds(labelIndex, labelPath)
-  assert (idToVocab, 'idToVocab must be ready before calling labelIndexToTokenIds')
+  assert (_G.idToVocab, '_G.idToVocab must be ready before calling labelIndexToTokenIds')
   if vocabToId == nil then
     vocabToId = tds.Hash()
-    for i = 1, #idToVocab do
-      vocabToId[idToVocab[i]] = i+4
+    for i = 1, #_G.idToVocab do
+      vocabToId[_G.idToVocab[i]] = i+4
     end
   end
   if labelLines == nil then
@@ -238,7 +238,7 @@ function tokenIdsToLabelString(tokenIds)
     if tokenId == onmt.Constants.PAD or tokenId == onmt.Constants.BOS or tokenId == onmt.Constants.EOS then
       break
     end
-    local token = idToVocab[tokenId-4]
+    local token = _G.idToVocab[tokenId-4]
     if tokenId == onmt.Constants.UNK then
       token = 'UNK'
     end

@@ -84,12 +84,12 @@ torch.manualSeed(opt.seed)
 math.randomseed(opt.seed)
 cutorch.manualSeed(opt.seed)
 
-function run(model, phase, batchSize, numEpochs, trainData, valData, modelDir, stepsPerCheckpoint, beamSize, outputDir, learningRateInit, learningRateDecay)
+local function run(model, phase, batchSize, numEpochs, trainData, valData, modelDir, stepsPerCheckpoint, beamSize, outputDir, learningRateInit, learningRateDecay)
   local loss = 0
   local numSamples = 0
   local numNonzeros = 0
   model.optimState.learningRate = model.optimState.learningRate or learningRateInit
-  logger:info('Learning Rate: %f', model.optimState.learningRate)
+  _G.logger:info('Learning Rate: %f', model.optimState.learningRate)
 
   assert(phase == 'train' or phase == 'test', 'phase must be either train or test')
   local isForwardOnly
@@ -102,7 +102,7 @@ function run(model, phase, batchSize, numEpochs, trainData, valData, modelDir, s
     model:setOutputDirectory(outputDir)
   end
 
-  logger:info('Running...')
+  _G.logger:info('Running...')
   local valLosses = {}
   -- Run numEpochs epochs
   for epoch = 1, numEpochs do
@@ -118,7 +118,7 @@ function run(model, phase, batchSize, numEpochs, trainData, valData, modelDir, s
       local actualBatchSize = trainBatch[1]:size(1)
       local stepLoss, stats = model:step(trainBatch, isForwardOnly, beamSize) -- do one step
       if not isForwardOnly then
-        logger:info('step perplexity: %f', math.exp(stepLoss/stats[1]))
+        _G.logger:info('step perplexity: %f', math.exp(stepLoss/stats[1]))
       end
       numSamples = numSamples + actualBatchSize
       numNonzeros = numNonzeros + stats[1]
@@ -126,30 +126,30 @@ function run(model, phase, batchSize, numEpochs, trainData, valData, modelDir, s
       model.numSteps = model.numSteps + 1
       if model.numSteps % stepsPerCheckpoint == 0 then
         if isForwardOnly then
-          logger:info('Step: %d. Number of samples: %d.', model.numSteps, numSamples)
+          _G.logger:info('Step: %d. Number of samples: %d.', model.numSteps, numSamples)
         else
-          logger:info('Step: %d. Training Perplexity: %f', model.numSteps, math.exp(loss/numNonzeros))
-          logger:info('Saving Model')
+          _G.logger:info('Step: %d. Training Perplexity: %f', model.numSteps, math.exp(loss/numNonzeros))
+          _G.logger:info('Saving Model')
           local modelPath = paths.concat(modelDir, string.format('model_%d', model.numSteps))
           local modelPathTemp = paths.concat(modelDir, '.model.tmp') -- to ensure atomic operation
           local modelPathLatest = paths.concat(modelDir, 'model_latest')
           model:save(modelPath)
-          logger:info('Model saved to %s', modelPath)
+          _G.logger:info('Model saved to %s', modelPath)
           os.execute(string.format('cp %s %s', modelPath, modelPathTemp))
           os.execute(string.format('mv %s %s', modelPathTemp, modelPathLatest))
 
-          loss, numNonzeros = 0, 0, 0
+          loss, numNonzeros = 0, 0
           collectgarbage()
         end
       end
     end -- Run 1 epoch
     -- After each epoch, evaluate on validation if phase is train
     if not isForwardOnly then
-      logger:info('Evaluating model on validation data')
+      _G.logger:info('Evaluating model on validation data')
       local valLoss, valNumSamples, valNumNonzeros, valNumCorrect = 0, 0, 0, 0
       -- Run 1 epoch on validation data
       while true do
-        valBatch = valData:nextBatch(batchSize)
+        local valBatch = valData:nextBatch(batchSize)
         if valBatch == nil then
           break
         end
@@ -161,34 +161,35 @@ function run(model, phase, batchSize, numEpochs, trainData, valData, modelDir, s
         valNumCorrect = valNumCorrect + stats[2]
       end -- Run 1 epoch
       valLosses[epoch] = valLoss
-      logger:info('Epoch: %d. Step: %d. Val Accuracy: %f. Val Perplexity: %f', epoch, model.numSteps, valNumCorrect/valNumSamples, math.exp(valLoss/valNumNonzeros))
+      _G.logger:info('Epoch: %d. Step: %d. Val Accuracy: %f. Val Perplexity: %f', epoch, model.numSteps, valNumCorrect/valNumSamples, math.exp(valLoss/valNumNonzeros))
       -- Decay learning rate if validation loss does not decrease
       if valLosses[epoch-1] and valLosses[epoch] > valLosses[epoch-1] then
         model.optimState.learningRate = model.optimState.learningRate * learningRateDecay
-        logger:info('Decay learning rate to %f', model.optimState.learningRate)
+        _G.logger:info('Decay learning rate to %f', model.optimState.learningRate)
       end
-      logger:info('Saving Model')
+      _G.logger:info('Saving Model')
       local modelPath = paths.concat(modelDir, string.format('model_%d', model.numSteps))
       local modelPathTemp = paths.concat(modelDir, '.model.tmp')
       local modelPathLatest = paths.concat(modelDir, 'model_latest')
       model:save(modelPath)
-      logger:info('Model saved to %s', modelPath)
+      _G.logger:info('Model saved to %s', modelPath)
       os.execute(string.format('cp %s %s', modelPath, modelPathTemp))
       os.execute(string.format('mv %s %s', modelPathTemp, modelPathLatest))
     else -- isForwardOnly == true
-      logger:info('Epoch ends. Number of samples: %d.', numSamples)
+      _G.logger:info('Epoch ends. Number of samples: %d.', numSamples)
     end
   end -- for epoch
 end -- run function
 
-function main()
+local function main()
   assert (opt.gpu_id > 0, 'Only support using GPU! Please specify a valid gpu_id.')
 
-  logger = onmt.utils.Logger.new(opt.log_path)
-  logger:info('Command Line Arguments: %s', table.concat(arg, ' ') or '')
+  _G.logger = onmt.utils.Logger.new(opt.log_path)
+  _G.logger.mute = false
+  _G.logger:info('Command Line Arguments: %s', table.concat(arg, ' ') or '')
 
   local gpuId = opt.gpu_id
-  logger:info('Using CUDA on GPU %d', gpuId)
+  _G.logger:info('Using CUDA on GPU %d', gpuId)
   cutorch.setDevice(gpuId)
   onmt.utils.Cuda.init({gpuid=gpuId})
 
@@ -198,19 +199,19 @@ function main()
   opt.maxEncoderLengthHeight = math.floor(opt.max_image_height / 8.0) -- feature maps after CNN become 8 times smaller
 
   -- Build Model
-  logger:info('Building model')
+  _G.logger:info('Building model')
   local model = Model()
   local modelPath = paths.concat(opt.model_dir, 'model_latest')
   if opt.load_model and paths.filep(modelPath) then
-    logger:info('Loading model from %s', modelPath)
+    _G.logger:info('Loading model from %s', modelPath)
     model:load(modelPath, opt)
   else
     -- Load Vocabulary
-    logger:info('Loading vocabulary from %s', opt.vocab_file)
-    idToVocab = tds.Hash() -- vocabulary file is global
+    _G.logger:info('Loading vocabulary from %s', opt.vocab_file)
+    _G.idToVocab = tds.Hash() -- vocabulary file is global
     local file, err = io.open(opt.vocab_file, "r")
     if err then
-      logger:error('Vocabulary file %s does not exist!', opt.vocab_file)
+      _G.logger:error('Vocabulary file %s does not exist!', opt.vocab_file)
       os.exit()
     end
     for line in file:lines() do
@@ -218,10 +219,10 @@ function main()
       if onmt.utils.String.isEmpty(token) then
         token = ' '
       end
-      idToVocab[#idToVocab+1] = token
+      _G.idToVocab[#_G.idToVocab+1] = token
     end
-    opt.targetVocabSize = #idToVocab + 4
-    logger:info('Creating model with fresh parameters')
+    opt.targetVocabSize = #_G.idToVocab + 4
+    _G.logger:info('Creating model with fresh parameters')
     model:create(opt)
   end
 
@@ -230,26 +231,26 @@ function main()
   end
 
   -- Load Data
-  logger:info('Image directory: %s', opt.image_dir)
-  logger:info('Loading %s data from %s', opt.phase, opt.data_path)
+  _G.logger:info('Image directory: %s', opt.image_dir)
+  _G.logger:info('Loading %s data from %s', opt.phase, opt.data_path)
   if opt.phase == 'train' and (not paths.filep(opt.label_path)) then
-      logger:error('Label file %s does not exist!', opt.label_path)
+      _G.logger:error('Label file %s does not exist!', opt.label_path)
       os.exit(1)
   end
   local trainData = DataLoader(opt.image_dir, opt.data_path, opt.label_path, opt.max_image_height, opt.max_image_width, opt.max_num_tokens)
-  logger:info('Loaded')
+  _G.logger:info('Loaded')
   local valData
   if opt.phase == 'train' then
-    logger:info('Loading validation data from %s', opt.val_data_path)
+    _G.logger:info('Loading validation data from %s', opt.val_data_path)
     valData = DataLoader(opt.image_dir, opt.val_data_path, opt.label_path, opt.max_image_height, opt.max_image_width, opt.max_num_tokens)
-    logger:info('Loaded')
+    _G.logger:info('Loaded')
   end
 
   -- Run Model
   run(model, opt.phase, opt.batch_size, opt.num_epochs, trainData, valData, opt.model_dir, opt.steps_per_checkpoint, opt.beam_size, opt.output_dir, opt.learning_rate, opt.lr_decay)
 
   model:shutDown()
-  logger:shutDown()
+  _G.logger:shutDown()
 end -- function main
 
 main()
