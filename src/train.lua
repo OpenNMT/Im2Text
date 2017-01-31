@@ -79,6 +79,8 @@ cmd:option('-max_image_width', 500, [[Maximum image width]]) --800/2/2/2
 cmd:option('-max_image_height', 160, [[Maximum image height]]) --80 / (2*2*2)
 cmd:option('-seed', 910820, [[Load model from model_dir or not]])
 
+onmt.utils.Profiler.declareOpts(cmd)
+
 local opt = cmd:parse(arg)
 torch.manualSeed(opt.seed)
 math.randomseed(opt.seed)
@@ -184,6 +186,7 @@ end -- run function
 local function main()
   assert (opt.gpu_id > 0, 'Only support using GPU! Please specify a valid gpu_id.')
 
+_G.profiler = onmt.utils.Profiler.new(opt.profile)
   _G.logger = onmt.utils.Logger.new(opt.log_path)
   _G.logger.mute = false
   _G.logger:info('Command Line Arguments: %s', table.concat(arg, ' ') or '')
