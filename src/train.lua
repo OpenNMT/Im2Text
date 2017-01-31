@@ -191,7 +191,7 @@ local function main()
   local gpuId = opt.gpu_id
   _G.logger:info('Using CUDA on GPU %d', gpuId)
   cutorch.setDevice(gpuId)
-  onmt.utils.Cuda.init({gpuid=gpuId})
+  onmt.utils.Cuda.init({gpuid=string.format('%d', gpuId)})
 
   -- Convert Options
   opt.maxDecoderLength = opt.max_num_tokens + 1 -- since <StartOfSequence> is prepended to the sequence
