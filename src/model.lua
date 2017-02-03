@@ -169,28 +169,8 @@ end
 
 -- one step forward (and optionally backward)
 function model:step(inputBatch, isForwardOnly, beamSize)
-  if isForwardOnly then
-    beamSize = beamSize or 1 -- default greedy decoding
-    beamSize = math.min(beamSize, self.config.targetVocabSize)
-    if not self.initBeam then
-      self.initBeam = true
-      self.beamScores = onmt.utils.Cuda.convert(torch.zeros(self.config.batchSize, beamSize))
-      self.currentIndicesHistory = {}
-      self.beamParentsHistory = {}
-    else
-      self.beamScores:zero()
-      self.currentIndicesHistory = {}
-      self.beamParentsHistory = {}
-    end
-  else -- isForwardOnly == false
-    if self.initBeam then
-      self.initBeam = false
-      self.currentIndicesHistory = {}
-      self.beamParentsHistory = {}
-      self.beamScores = nil
-      collectgarbage()
-    end
-  end
+  beamSize = beamSize or 1 -- default greedy decoding
+  assert (beamSize <= self.config.targetVocabSize)
   local images = onmt.utils.Cuda.convert(inputBatch[1])
   local targetInput = onmt.utils.Cuda.convert(inputBatch[2])
   local targetOutput = onmt.utils.Cuda.convert(inputBatch[3])
@@ -237,6 +217,7 @@ function model:step(inputBatch, isForwardOnly, beamSize)
     local context = self.contextProto[{{1, batchSize}, {1, featureMapHeight * featureMapWidth}}]
     local decoderBatch = Batch():setTargetInput(targetIn):setTargetOutput(targetOut)
     decoderBatch.sourceLength = context:size(2)
+    decoderBatch.sourceSize = onmt.utils.Cuda.convert(torch.IntTensor(batchSize)):fill(context:size(2))
     for i = 1, featureMapHeight do
       local pos = onmt.utils.Cuda.convert(torch.zeros(batchSize)):fill(i)
       local posEmbeddingFw  = self.posEmbeddingFw:forward(pos):view(1, batchSize, -1) -- (1, batchSize, cnnFeatureSize)
@@ -252,90 +233,22 @@ function model:step(inputBatch, isForwardOnly, beamSize)
         context[{{}, index, {}}]:copy(rowContext[{{}, t+1, {}}])
       end
     end
-    local decoderOutputs
-    -- beam search
-    if isForwardOnly then
-      local beamReplicate = function(h)
-        assert(1 <= h:dim() and h:dim() <= 3, 'does not support ndim except for 1, 2 and 3')
-        local batchSize = h:size(1)
-        if h:dim() == 1 then
-          return h:contiguous():view(batchSize, 1):expand(batchSize, beamSize):contiguous():view(-1)
-        elseif h:dim() == 2 then
-          local size = h:size(2)
-          return h:contiguous():view(batchSize, 1, size):expand(batchSize, beamSize, size):contiguous():view(batchSize * beamSize, size)
-        else -- h:dim() == 3
-          local size1, size2 = h:size(2), h:size(3)
-          return h:contiguous():view(batchSize, 1, size1, size2):expand(batchSize, beamSize, size1, size2):contiguous():view(batchSize * beamSize, size1, size2)
-        end
-      end
-      local beamContext = beamReplicate(context)
-      local decoderStates = onmt.utils.Tensor.initTensorTable(self.decoder.args.numEffectiveLayers,
-                onmt.utils.Cuda.convert(torch.Tensor()),
-                { batchSize, self.decoder.args.rnnSize })
-      local decoderInput, decoderOutput
-      for t = 1, targetLength do
-        local decoderContext
-        if t == 1 then
-          decoderInput = onmt.utils.Cuda.convert(torch.zeros(batchSize)):fill(onmt.Constants.BOS)
-          decoderContext = context
-        else
-          decoderContext = beamContext
-        end
-        decoderOutput, decoderStates = self.decoder:forwardOne(decoderInput, decoderStates, decoderContext, decoderOutput, t)
-        local probs = self.decoder.generator:forward(decoderOutput)[1] -- t ~= 1, (batchSize * beamSize, targetVocabSize); t == 1, (batchSize, targetVocabSize)
-        local currentIndices, rawIndices
-        local beamParents
-        if t == 1 then
-          self.beamScores, rawIndices = probs:topk(beamSize, true)
-          rawIndices = onmt.utils.Cuda.convert(rawIndices:double())
-          currentIndices = rawIndices
-        else
-          probs:select(2, onmt.Constants.PAD):maskedFill(decoderInput:eq(onmt.Constants.PAD), 0) -- once padding or EOS encountered, stuck at that point
-          probs:select(2, onmt.Constants.PAD):maskedFill(decoderInput:eq(onmt.Constants.EOS), 0)
-          local totalScores = (probs:view(batchSize, beamSize, self.config.targetVocabSize) + self.beamScores[{{1, batchSize}, {}}]:view(batchSize, beamSize, 1):expand(batchSize, beamSize, self.config.targetVocabSize)):view(batchSize, beamSize * self.config.targetVocabSize) -- (batchSize, beamSize * targetVocabSize)
-          self.beamScores, rawIndices = totalScores:topk(beamSize, true) -- (batchSize, beamSize)
-          rawIndices = onmt.utils.Cuda.convert(rawIndices:double())
-          rawIndices:add(-1)
-          currentIndices = onmt.utils.Cuda.convert(rawIndices:double():fmod(self.config.targetVocabSize)) + 1 -- (batchSize, beamSize)
-        end
-        beamParents = onmt.utils.Cuda.convert(rawIndices:int()/self.config.targetVocabSize + 1) -- (batchSize, beamSize)
-        decoderInput = currentIndices:view(batchSize * beamSize)
-        table.insert(self.currentIndicesHistory, currentIndices:clone())
-        table.insert(self.beamParentsHistory, beamParents:clone())
-
-        if self.config.inputFeed then
-          if t == 1 then
-            decoderOutput = beamReplicate(decoderOutput)
-          end
-          decoderOutput = decoderOutput:index(1, beamParents:view(-1) + onmt.utils.Cuda.convert(torch.range(0, (batchSize - 1) * beamSize, beamSize):long()):contiguous():view(batchSize, 1):expand(batchSize, beamSize):contiguous():view(-1))
-        end
-        for j = 1, #decoderStates do
-          local decoderState = decoderStates[j] -- (batchSize * beamSize, decoderNumHidden)
-          if t == 1 then
-            decoderState = beamReplicate(decoderState)
-          end
-          decoderStates[j] = decoderState:index(1, beamParents:view(-1) + onmt.utils.Cuda.convert(torch.range(0, (batchSize - 1) * beamSize, beamSize):long()):contiguous():view(batchSize,1):expand(batchSize, beamSize):contiguous():view(-1))
-        end
-      end
-    else -- isForwardOnly == false
-      decoderOutputs = self.decoder:forward(decoderBatch, nil, context)
-    end
 
     -- evaluate loss (and optionally do backward)
     local loss, numCorrect
     numCorrect = 0
     if isForwardOnly then
-      -- final decoding
+      -- Specify how to go one step forward.
+      local advancer = onmt.translate.DecoderAdvancer.new(self.decoder, decoderBatch, context, self.config.maxDecoderLength)
+      
+      -- Conduct beam search.
+      local beamSearcher = onmt.translate.BeamSearcher.new(advancer)
+      local results = beamSearcher:search(beamSize, 1)
       local predTarget = onmt.utils.Cuda.convert(torch.zeros(batchSize, targetLength)):fill(onmt.Constants.PAD)
-      local _, indices = torch.max(self.beamScores[{{1, batchSize},{}}], 2) -- (batchSize, 1)
-      indices = onmt.utils.Cuda.convert(indices:double())
-      indices = indices:view(-1) -- batchSize
-      local currentIndices = self.currentIndicesHistory[#self.currentIndicesHistory]:view(-1):index(1, indices + onmt.utils.Cuda.convert(torch.range(0, (batchSize - 1) * beamSize, beamSize):long())) -- batchSize
-      for t = targetLength, 1, -1 do
-        predTarget[{{1, batchSize}, t}]:copy(currentIndices)
-        indices = self.beamParentsHistory[t]:view(-1):index(1, indices + onmt.utils.Cuda.convert(torch.range(0, (batchSize - 1) * beamSize, beamSize):long())) -- batchSize
-        if t > 1 then
-          currentIndices = self.currentIndicesHistory[t-1]:view(-1):index(1, indices + onmt.utils.Cuda.convert(torch.range(0, (batchSize - 1) * beamSize, beamSize):long())) -- batchSize
+      for b = 1, batchSize do
+        local tokens = results[b][1].tokens
+        for t = 1, #tokens do
+          predTarget[b][t] = tokens[t]
         end
       end
       local predLabels = targetsTensorToLabelStrings(predTarget)
@@ -349,8 +262,10 @@ function model:step(inputBatch, isForwardOnly, beamSize)
         self.outputFile:flush()
       end
       -- get loss
+      self.decoder:maskPadding()
       loss = self.decoder:computeLoss(decoderBatch, nil, context, self.criterion) / batchSize
     else -- isForwardOnly == false
+      local decoderOutputs = self.decoder:forward(decoderBatch, nil, context)
       local _, gradContext, totalLoss = self.decoder:backward(decoderBatch, decoderOutputs, self.criterion)
       loss = totalLoss / batchSize
       gradContext = gradContext:contiguous():view(batchSize, featureMapHeight, featureMapWidth, -1) -- (batchSize, featureMapHeight, featureMapWidth, cnnFeatureSize)
