@@ -23,25 +23,28 @@ Im2Text is built on top of <a href="https://opennmt.github.io/">OpenNMT</a>. You
 
 To get started, we provide a toy Math-to-LaTex example. We assume that the working directory is `Im2Text` throughout this document.
 
-Im2Text consists of two commands:
+Im2Text consists of three commands:
 
-1) Train the model.
-
-```
-th src/train.lua -phase train -gpu_id 1 -input_feed -model_dir model \
--image_dir data/images -data_path data/train.txt -val_data_path data/validate.txt -label_path data/labels.txt -vocab_file data/vocab.txt \
--batch_size 8 -beam_size 1 \
--max_num_tokens 150 -max_image_width 500 -max_image_height 160
-```
-
-2) Translate the images.
+1) Preprocess data.
 
 ```
-th src/train.lua -phase test -gpu_id 1 -load_model -model_dir model \
+th preprocess.lua  -image_dir data/images -train data/train.txt -labels data/labels.txt \
+  -valid data/validate.txt -save_data save
+```
+
+2) Train the model.
+
+```
+th src/train.lua -phase train -gpuid 1 -input_feed -data save-train.t7 -max_batch_size 8
+```
+
+3) Translate the images. (In progress)
+
+```
+th src/train.lua -phase test -gpuid 1 -load_model -model model.t7 \
 -image_dir data/images -data_path data/test.txt \
 -output_dir results \
--batch_size 2 -beam_size 5 \
--max_num_tokens 500 -max_image_width 800 -max_image_height 800
+-max_batch_size 2 -beam_size 5
 ```
 
 The above dataset is sampled from the [processed-im2latex-100k-dataset](http://lstm.seas.harvard.edu/latex/processed-im2latex-100k-dataset.tgz). We provide a trained model [[link]](http://lstm.seas.harvard.edu/latex/model_latest) on this dataset. In order to use it, download and put it under `model_dir` before translating the images.

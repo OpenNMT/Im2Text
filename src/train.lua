@@ -2,11 +2,8 @@
 --]]
 require 'nn'
 require 'nngraph'
-require 'cunn'
-require 'cutorch'
-require 'cudnn'
 require 'paths'
-local status = pcall(function() require('onmt') end)
+local status = pcall(function() require('onmt.init') end)
 if not status then
   print('OpenNMT not found. Please enter the path to OpenNMT: ')
   local onmtPath = io.read()
@@ -17,242 +14,286 @@ if not status then
     os.exit(1)
   end
 end
-tds = require 'tds'
+require 'onmt.models.Model'
+local tds = require 'tds'
 
-require 'src.model'
-require 'src.data'
+local cmd = onmt.ExtendedCmdLine.new("src/train.lua")
 
-local cmd = torch.CmdLine()
+-------------- Options declaration
+local data_options = {
+  {'-data',       '', [[Path to the training *-train.t7 file from preprocess.lua]],
+                      {valid=onmt.ExtendedCmdLine.nonEmpty}},
+  {'-save_model', '', [[Model filename (the model will be saved as
+                            <save_model>_epochN_PPL.t7 where PPL is the validation perplexity]],
+                      {valid=onmt.ExtendedCmdLine.nonEmpty}}
+}
 
--- Input and Output
-cmd:text('')
-cmd:text('**Control**')
-cmd:text('')
-cmd:option('-phase', 'test', [[train or test]])
-cmd:option('-load_model', false, [[Load model from model_dir or not]])
-cmd:option('-gpu_id', 1, [[Which gpu to use]])
+cmd:setCmdLineOptions(data_options, "Data")
 
-cmd:text('')
-cmd:text('**Input and Output**')
-cmd:text('')
-cmd:option('-image_dir', '', [[The base directory of the image path in data-path.]])
-cmd:option('-data_path', '', [[The file containing data file names and label indexes. Format per line: image_path label_index. Note that label_index count from 0.]])
-cmd:option('-label_path', '', [[The file containing tokenized labels. Each line corresponds to a label.]])
-cmd:option('-val_data_path', '', [[The path containing validate data file names and labels. Format per line: image_path characters]])
-cmd:option('-vocab_file', '', [[Vocabulary file. A token per line.]])
-cmd:option('-model_dir', 'model', [[The directory for saving and loading model parameters (structure is not stored)]])
-cmd:option('-output_dir', 'results', [[The path to put results]])
 
--- Logging
-cmd:text('')
-cmd:text('**Display**')
-cmd:text('')
-cmd:option('-steps_per_checkpoint', 100, [[Checkpointing (print perplexity, save model) per how many steps]])
-cmd:option('-log_path', 'log.txt', [[The path to put log]])
+-- Generic Model options.
+onmt.Model.declareOpts(cmd)
 
--- Optimization
-cmd:text('')
-cmd:text('**Optimization**')
-cmd:text('')
-cmd:option('-num_epochs', 15, [[The number of whole data passes]])
-cmd:option('-batch_size', 1, [[Batch size]])
-cmd:option('-learning_rate', 0.1, [[Initial learning rate]])
-cmd:option('-lr_decay', 0.5, [[Decay learning rate by this much if perplexity does not decrease on the validation set]])
+-- Optimization options.
+onmt.train.Optim.declareOpts(cmd)
 
--- Network
-cmd:text('')
-cmd:text('**Network**')
-cmd:text('')
-cmd:option('-input_feed', false, [[Whether or not use LSTM attention decoder cell]])
-cmd:option('-encoder_num_hidden', 256, [[Number of hidden units in encoder cell]])
-cmd:option('-encoder_num_layers', 1, [[Number of hidden layers in encoder cell]])
-cmd:option('-decoder_num_layers', 1, [[Number of hidden units in decoder cell]])
-cmd:option('-target_embedding_size', 80, [[Embedding dimension for each target]])
+-- Training process options.
+onmt.Trainer.declareOpts(cmd)
 
--- Other
-cmd:text('')
-cmd:text('**Other**')
-cmd:text('')
-cmd:option('-beam_size', 1, [[Beam size for decoding]])
-cmd:option('-max_num_tokens', 150, [[Maximum number of output tokens]]) -- when evaluate, this is the cut-off length.
-cmd:option('-max_image_width', 500, [[Maximum image width]]) --800/2/2/2
-cmd:option('-max_image_height', 160, [[Maximum image height]]) --80 / (2*2*2)
-cmd:option('-seed', 910820, [[Load model from model_dir or not]])
+-- Checkpoints options.
+onmt.train.Checkpoint.declareOpts(cmd)
 
+-- GPU
+onmt.utils.Cuda.declareOpts(cmd)
+-- Memory optimization
+onmt.utils.Memory.declareOpts(cmd)
+-- Misc
+cmd:option('-seed', 3435, [[Seed for random initialization]], {valid=onmt.ExtendedCmdLine.isUInt()})
+-- Logger options
+onmt.utils.Logger.declareOpts(cmd)
+-- Profiler options
 onmt.utils.Profiler.declareOpts(cmd)
+-- Optimization options.
+onmt.train.Optim.declareOpts(cmd)
+
+local modelClass = require 'src.model'
+modelClass.declareOpts(cmd)
 
 local opt = cmd:parse(arg)
-torch.manualSeed(opt.seed)
-math.randomseed(opt.seed)
-cutorch.manualSeed(opt.seed)
-
-local function run(model, phase, batchSize, numEpochs, trainData, valData, modelDir, stepsPerCheckpoint, beamSize, outputDir, learningRateInit, learningRateDecay)
-  local loss = 0
-  local numSamples = 0
-  local numNonzeros = 0
-  model.optimState.learningRate = model.optimState.learningRate or learningRateInit
-  _G.logger:info('Learning Rate: %f', model.optimState.learningRate)
-
-  assert(phase == 'train' or phase == 'test', 'phase must be either train or test')
-  local isForwardOnly
-  if phase == 'train' then
-    isForwardOnly = false
-  else
-    isForwardOnly = true
-    numEpochs = 1
-    model.numSteps = 0
-    model:setOutputDirectory(outputDir)
-  end
-
-  _G.logger:info('Running...')
-  local valLosses = {}
-  -- Run numEpochs epochs
-  for epoch = 1, numEpochs do
-    if not isForwardOnly then
-      trainData:shuffle()
-    end
-    -- Run 1 epoch
-    while true do
-      local trainBatch = trainData:nextBatch(batchSize)
-      if trainBatch == nil then
-        break
-      end
-      local actualBatchSize = trainBatch[1]:size(1)
-      local stepLoss, stats = model:step(trainBatch, isForwardOnly, beamSize) -- do one step
-      if not isForwardOnly then
-        _G.logger:info('step perplexity: %f', math.exp(stepLoss/stats[1]))
-      end
-      numSamples = numSamples + actualBatchSize
-      numNonzeros = numNonzeros + stats[1]
-      loss = loss + stepLoss
-      model.numSteps = model.numSteps + 1
-      if model.numSteps % stepsPerCheckpoint == 0 then
-        if isForwardOnly then
-          _G.logger:info('Step: %d. Number of samples: %d.', model.numSteps, numSamples)
-        else
-          _G.logger:info('Step: %d. Training Perplexity: %f', model.numSteps, math.exp(loss/numNonzeros))
-          _G.logger:info('Saving Model')
-          local modelPath = paths.concat(modelDir, string.format('model_%d', model.numSteps))
-          local modelPathTemp = paths.concat(modelDir, '.model.tmp') -- to ensure atomic operation
-          local modelPathLatest = paths.concat(modelDir, 'model_latest')
-          model:save(modelPath)
-          _G.logger:info('Model saved to %s', modelPath)
-          os.execute(string.format('cp %s %s', modelPath, modelPathTemp))
-          os.execute(string.format('mv %s %s', modelPathTemp, modelPathLatest))
-
-          loss, numNonzeros = 0, 0
-          collectgarbage()
-        end
-      end
-    end -- Run 1 epoch
-    -- After each epoch, evaluate on validation if phase is train
-    if not isForwardOnly then
-      _G.logger:info('Evaluating model on validation data')
-      local valLoss, valNumSamples, valNumNonzeros, valNumCorrect = 0, 0, 0, 0
-      -- Run 1 epoch on validation data
-      while true do
-        local valBatch = valData:nextBatch(batchSize)
-        if valBatch == nil then
-          break
-        end
-        local actualBatchSize = valBatch[1]:size(1)
-        local stepLoss, stats = model:step(valBatch, true, beamSize)
-        valLoss = valLoss + stepLoss
-        valNumSamples = valNumSamples + actualBatchSize
-        valNumNonzeros = valNumNonzeros + stats[1]
-        valNumCorrect = valNumCorrect + stats[2]
-      end -- Run 1 epoch
-      valLosses[epoch] = valLoss
-      _G.logger:info('Epoch: %d. Step: %d. Val Accuracy: %f. Val Perplexity: %f', epoch, model.numSteps, valNumCorrect/valNumSamples, math.exp(valLoss/valNumNonzeros))
-      -- Decay learning rate if validation loss does not decrease
-      if valLosses[epoch-1] and valLosses[epoch] > valLosses[epoch-1] then
-        model.optimState.learningRate = model.optimState.learningRate * learningRateDecay
-        _G.logger:info('Decay learning rate to %f', model.optimState.learningRate)
-      end
-      _G.logger:info('Saving Model')
-      local modelPath = paths.concat(modelDir, string.format('model_%d', model.numSteps))
-      local modelPathTemp = paths.concat(modelDir, '.model.tmp')
-      local modelPathLatest = paths.concat(modelDir, 'model_latest')
-      model:save(modelPath)
-      _G.logger:info('Model saved to %s', modelPath)
-      os.execute(string.format('cp %s %s', modelPath, modelPathTemp))
-      os.execute(string.format('mv %s %s', modelPathTemp, modelPathLatest))
-    else -- isForwardOnly == true
-      _G.logger:info('Epoch ends. Number of samples: %d.', numSamples)
-    end
-  end -- for epoch
-end -- run function
 
 local function main()
-  assert (opt.gpu_id > 0, 'Only support using GPU! Please specify a valid gpu_id.')
+  torch.manualSeed(opt.seed)
+  math.randomseed(opt.seed)
 
-_G.profiler = onmt.utils.Profiler.new(opt.profile)
   _G.logger = onmt.utils.Logger.new(opt.log_path)
-  _G.logger.mute = false
+  _G.profiler = onmt.utils.Profiler.new(opt.profile)
   _G.logger:info('Command Line Arguments: %s', table.concat(arg, ' ') or '')
 
-  local gpuId = opt.gpu_id
-  _G.logger:info('Using CUDA on GPU %d', gpuId)
-  cutorch.setDevice(gpuId)
-  onmt.utils.Cuda.init({gpuid=string.format('%d', gpuId)})
+  onmt.utils.Cuda.init(opt)
+  onmt.utils.Parallel.init(opt)
 
-  -- Convert Options
-  opt.maxDecoderLength = opt.max_num_tokens + 1 -- since <StartOfSequence> is prepended to the sequence
-  opt.maxEncoderLengthWidth = math.floor(opt.max_image_width / 8.0) -- feature maps after CNN become 8 times smaller
-  opt.maxEncoderLengthHeight = math.floor(opt.max_image_height / 8.0) -- feature maps after CNN become 8 times smaller
 
-  -- Build Model
-  _G.logger:info('Building model')
-  local model = Model()
-  local modelPath = paths.concat(opt.model_dir, 'model_latest')
-  if opt.load_model and paths.filep(modelPath) then
-    _G.logger:info('Loading model from %s', modelPath)
-    model:load(modelPath, opt)
-  else
-    -- Load Vocabulary
-    _G.logger:info('Loading vocabulary from %s', opt.vocab_file)
-    _G.idToVocab = tds.Hash() -- vocabulary file is global
-    local file, err = io.open(opt.vocab_file, "r")
-    if err then
-      _G.logger:error('Vocabulary file %s does not exist!', opt.vocab_file)
-      os.exit()
+  local checkpoint
+  if onmt.utils.Cuda.activated then
+    require 'cudnn'
+  end
+  checkpoint, opt = onmt.train.Checkpoint.loadFromCheckpoint(opt)
+
+  local dataset = torch.load(opt.data, 'binary', false)
+
+  -- main model
+  local model
+
+  -- build or load model from checkpoint and copy to GPUs
+  onmt.utils.Parallel.launch(function(idx)
+    if checkpoint.models then
+      _G.model = modelClass.new(opt, checkpoint, idx > 1)
+    else
+      local verbose = idx == 1
+      _G.model = modelClass.new(opt, dataset, verbose)
     end
-    for line in file:lines() do
-      local token = onmt.utils.String.strip(line)
-      if onmt.utils.String.isEmpty(token) then
-        token = ' '
+    onmt.utils.Cuda.convert(_G.model)
+    return idx, _G.model
+  end, function(idx, themodel)
+    if idx == 1 then
+      model = themodel
+    end
+  end)
+  -- Define optimization method.
+  local optim = onmt.train.Optim.new(opt, opt.optim_states)
+  -- Initialize trainer.
+  local trainer = onmt.Trainer.new(opt)
+
+
+  -- keep backward compatibility
+  dataset.dataType = dataset.dataType or "BITEXT"
+
+  local Batch = onmt.data.Batch
+  
+  --[[ Return the maxLength, sizes, and non-zero count
+    of a batch of `seq`s ignoring `ignore` words.
+  --]]
+  local function getLength(seq, ignore)
+    if #seq == 0 then
+      return 0, 0, 0
+    end
+    local ndim = #seq[1]:size():totable()
+    local sizes = torch.IntTensor(#seq, ndim):zero()
+    local max = torch.Tensor(ndim):zero()
+    local sum = 0
+  
+    for i = 1, #seq do
+      local len = torch.Tensor(seq[i]:size():totable())
+      if ignore ~= nil then
+        len = len:add(-ignore)
       end
-      _G.idToVocab[#_G.idToVocab+1] = token
+      max = torch.cmax(max, len)
+      sum = sum + len:prod()
+      sizes[i]:copy(len)
     end
-    opt.targetVocabSize = #_G.idToVocab + 4
-    _G.logger:info('Creating model with fresh parameters')
-    model:create(opt)
+    if ndim == 1 then
+      max = max[1]
+      sizes = sizes:view(-1)
+    end
+    return max, sizes, sum
   end
-
-  if not paths.dirp(opt.model_dir) then
-    paths.mkdir(opt.model_dir)
+  --[[ Create a batch object.
+  
+  Parameters:
+  
+    * `src` - 2D table of source batch indices
+    * `srcFeatures` - 2D table of source batch features (opt)
+    * `tgt` - 2D table of target batch indices
+    * `tgtFeatures` - 2D table of target batch features (opt)
+  --]]
+  function Batch:__init(src, srcFeatures, tgt, tgtFeatures)
+    src = src or {}
+    srcFeatures = srcFeatures or {}
+    tgtFeatures = tgtFeatures or {}
+  
+    if tgt ~= nil then
+      assert(#src == #tgt, "source and target must have the same batch size")
+    end
+  
+    self.size = #src
+  
+    self.sourceLength, self.sourceSize = getLength(src)
+  
+    local sourceSeq
+    if torch.isTensor(self.sourceLength) then
+      local sizes = self.sourceLength:view(-1):totable()
+      sizes[#sizes + 1] = self.size
+      sourceSeq = torch.IntTensor(table.unpack(sizes)):fill(onmt.Constants.PAD)
+    else
+      sourceSeq = torch.IntTensor(self.sourceLength, self.size):fill(onmt.Constants.PAD)
+    end
+    self.sourceInput = sourceSeq:clone()
+    self.sourceInputRev = sourceSeq:clone()
+  
+    self.sourceInputFeatures = {}
+    self.sourceInputRevFeatures = {}
+  
+    if #srcFeatures > 0 then
+      for _ = 1, #srcFeatures[1] do
+        table.insert(self.sourceInputFeatures, sourceSeq:clone())
+        table.insert(self.sourceInputRevFeatures, sourceSeq:clone())
+      end
+    end
+  
+    if tgt ~= nil then
+      self.targetLength, self.targetSize, self.targetNonZeros = getLength(tgt, 1)
+  
+      local targetSeq = torch.IntTensor(self.targetLength, self.size):fill(onmt.Constants.PAD)
+      self.targetInput = targetSeq:clone()
+      self.targetOutput = targetSeq:clone()
+  
+      self.targetInputFeatures = {}
+      self.targetOutputFeatures = {}
+  
+      if #tgtFeatures > 0 then
+        for _ = 1, #tgtFeatures[1] do
+          table.insert(self.targetInputFeatures, targetSeq:clone())
+          table.insert(self.targetOutputFeatures, targetSeq:clone())
+        end
+      end
+    end
+  
+    for b = 1, self.size do
+      if torch.isTensor(self.sourceLength) then
+        self.sourceInput:narrow(self.sourceLength:size(1)+1, b, 1):copy(src[b])
+        self.sourceInputRev:narrow(self.sourceLength:size(1)+1, b, 1):copy(src[b])
+      else
+        local sourceOffset = self.sourceLength - self.sourceSize[b] + 1
+        local sourceInput = src[b]
+        local sourceInputRev = src[b]:index(1, torch.linspace(self.sourceSize[b], 1, self.sourceSize[b]):long())
+  
+        -- Source input is left padded [PPPPPPABCDE] .
+        self.sourceInput[{{sourceOffset, self.sourceLength}, b}]:copy(sourceInput)
+        self.sourceInputPadLeft = true
+  
+        -- Rev source input is right padded [EDCBAPPPPPP] .
+        self.sourceInputRev[{{1, self.sourceSize[b]}, b}]:copy(sourceInputRev)
+        self.sourceInputRevPadLeft = false
+  
+        for i = 1, #self.sourceInputFeatures do
+          local sourceInputFeatures = srcFeatures[b][i]
+          local sourceInputRevFeatures = srcFeatures[b][i]:index(1, torch.linspace(self.sourceSize[b], 1, self.sourceSize[b]):long())
+  
+          self.sourceInputFeatures[i][{{sourceOffset, self.sourceLength}, b}]:copy(sourceInputFeatures)
+          self.sourceInputRevFeatures[i][{{1, self.sourceSize[b]}, b}]:copy(sourceInputRevFeatures)
+        end
+      end
+  
+      if tgt ~= nil then
+        -- Input: [<s>ABCDE]
+        -- Ouput: [ABCDE</s>]
+        local targetLength = tgt[b]:size(1) - 1
+        local targetInput = tgt[b]:narrow(1, 1, targetLength)
+        local targetOutput = tgt[b]:narrow(1, 2, targetLength)
+  
+        -- Target is right padded [<S>ABCDEPPPPPP] .
+        self.targetInput[{{1, targetLength}, b}]:copy(targetInput)
+        self.targetOutput[{{1, targetLength}, b}]:copy(targetOutput)
+  
+        for i = 1, #self.targetInputFeatures do
+          local targetInputFeatures = tgtFeatures[b][i]:narrow(1, 1, targetLength)
+          local targetOutputFeatures = tgtFeatures[b][i]:narrow(1, 2, targetLength)
+  
+          self.targetInputFeatures[i][{{1, targetLength}, b}]:copy(targetInputFeatures)
+          self.targetOutputFeatures[i][{{1, targetLength}, b}]:copy(targetOutputFeatures)
+        end
+      end
+    end
   end
-
-  -- Load Data
-  _G.logger:info('Image directory: %s', opt.image_dir)
-  _G.logger:info('Loading %s data from %s', opt.phase, opt.data_path)
-  if opt.phase == 'train' and (not paths.filep(opt.label_path)) then
-      _G.logger:error('Label file %s does not exist!', opt.label_path)
-      os.exit(1)
+  local Dataset = onmt.data.Dataset
+  --[[ Setup up the training data to respect `maxBatchSize`. ]]
+  function Dataset:setBatchSize(maxBatchSize)
+  
+    self.batchRange = {}
+    self.maxSourceSize = torch.Tensor(self.src[1]:size():totable())
+    self.maxTargetLength = 0
+  
+    -- Prepares batches in terms of range within self.src and self.tgt.
+    local offset = 0
+    local batchSize = 1
+    local sourceSize = nil
+    local targetLength = nil
+    for i = 1, #self.src do
+      -- Set up the offsets to make same source size batches of the
+      -- correct size.
+      if batchSize == maxBatchSize or i == 1 or
+          torch.Tensor(self.src[i]:size():totable()):ne(sourceSize):any() then
+        if i > 1 then
+          table.insert(self.batchRange, { ["begin"] = offset, ["end"] = i - 1 })
+        end
+  
+        offset = i
+        batchSize = 1
+        sourceSize = torch.Tensor(self.src[i]:size():totable())
+        targetLength = 0
+      else
+        batchSize = batchSize + 1
+      end
+  
+      self.maxSourceSize = torch.cmax(self.maxSourceSize, sourceSize)
+  
+      if self.tgt ~= nil then
+        -- Target contains <s> and </s>.
+        local targetSeqLength = self.tgt[i]:size(1) - 1
+        targetLength = math.max(targetLength, targetSeqLength)
+        self.maxTargetLength = math.max(self.maxTargetLength, targetSeqLength)
+      end
+    end
+    -- Catch last batch.
+    table.insert(self.batchRange, { ["begin"] = offset, ["end"] = #self.src })
   end
-  local trainData = DataLoader(opt.image_dir, opt.data_path, opt.label_path, opt.max_image_height, opt.max_image_width, opt.max_num_tokens)
-  _G.logger:info('Loaded')
-  local valData
-  if opt.phase == 'train' then
-    _G.logger:info('Loading validation data from %s', opt.val_data_path)
-    valData = DataLoader(opt.image_dir, opt.val_data_path, opt.label_path, opt.max_image_height, opt.max_image_width, opt.max_num_tokens)
-    _G.logger:info('Loaded')
-  end
+  local trainData = Dataset.new(dataset.train.src, dataset.train.tgt)
+  local validData = Dataset.new(dataset.valid.src, dataset.valid.tgt)
+  trainData:setBatchSize(opt.max_batch_size)
+  validData:setBatchSize(opt.max_batch_size)
+  -- Launch train
+  trainer:train(model, optim, trainData, validData, dataset, checkpoint.info)
 
-  -- Run Model
-  run(model, opt.phase, opt.batch_size, opt.num_epochs, trainData, valData, opt.model_dir, opt.steps_per_checkpoint, opt.beam_size, opt.output_dir, opt.learning_rate, opt.lr_decay)
-
-  model:shutDown()
   _G.logger:shutDown()
 end -- function main
 
