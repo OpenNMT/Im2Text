@@ -6,7 +6,7 @@ require 'optim'
 require 'paths'
 require 'src.cnn'
 
-local model = torch.class('Model')
+local model = torch.class('WYGIWYS')
 
 -- constructor
 function model:__init()
@@ -257,6 +257,7 @@ function model:step(inputBatch, isForwardOnly, beamSize)
       numCorrect = batchSize - editDistanceRate
       if self.outputFile then
         for i = 1, #imagePaths do
+          _G.logger:info('%s\t%s\n', imagePaths[i], predLabels[i])
           self.outputFile:write(string.format('%s\t%s\n', imagePaths[i], predLabels[i]))
         end
         self.outputFile:flush()

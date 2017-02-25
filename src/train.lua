@@ -22,7 +22,7 @@ tds = require 'tds'
 require 'src.model'
 require 'src.data'
 
-local cmd = torch.CmdLine()
+local cmd = onmt.utils.ExtendedCmdLine.new('src/train.lua')
 
 -- Input and Output
 cmd:text('')
@@ -186,7 +186,7 @@ end -- run function
 local function main()
   assert (opt.gpu_id > 0, 'Only support using GPU! Please specify a valid gpu_id.')
 
-_G.profiler = onmt.utils.Profiler.new(opt.profile)
+_G.profiler = onmt.utils.Profiler.new(opt.profiler)
   _G.logger = onmt.utils.Logger.new(opt.log_path)
   _G.logger.mute = false
   _G.logger:info('Command Line Arguments: %s', table.concat(arg, ' ') or '')
@@ -203,7 +203,7 @@ _G.profiler = onmt.utils.Profiler.new(opt.profile)
 
   -- Build Model
   _G.logger:info('Building model')
-  local model = Model()
+  local model = WYGIWYS()
   local modelPath = paths.concat(opt.model_dir, 'model_latest')
   if opt.load_model and paths.filep(modelPath) then
     _G.logger:info('Loading model from %s', modelPath)
