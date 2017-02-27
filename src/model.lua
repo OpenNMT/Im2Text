@@ -9,7 +9,8 @@ require 'src.cnn'
 local model = torch.class('WYGIWYS')
 
 -- constructor
-function model:__init()
+function model:__init(optim)
+  self.optim = optim
 end
 
 -- in test phase, open a file for predictions
@@ -114,10 +115,6 @@ function model:create(config)
 
   self.numSteps = 0
   self._init = true
-
-  self.optimState = {}
-  self.optimState.learningRate = config.learningRate
-  self.optimState.method = 'sgd'
 
   self:_build()
 end
@@ -303,11 +300,10 @@ function model:step(inputBatch, isForwardOnly, beamSize)
   end
   if not isForwardOnly then
     -- optimizer
-    local optim = onmt.train.Optim.new(self.optimState)
-    optim:zeroGrad(self.gradParams)
+    self.optim:zeroGrad(self.gradParams)
     local loss, _, stats = feval(self.params)
-    optim:prepareGrad(self.gradParams, 20.0)
-    optim:updateParams(self.params, self.gradParams)
+    self.optim:prepareGrad(self.gradParams, 20.0)
+    self.optim:updateParams(self.params, self.gradParams)
 
     return loss * batchSize, stats
   else
