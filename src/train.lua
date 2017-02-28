@@ -56,8 +56,6 @@ cmd:text('**Optimization**')
 cmd:text('')
 cmd:option('-num_epochs', 15, [[The number of whole data passes]])
 cmd:option('-batch_size', 1, [[Batch size]])
-cmd:option('-learning_rate', 0.1, [[Initial learning rate]])
-cmd:option('-lr_decay', 0.5, [[Decay learning rate by this much if perplexity does not decrease on the validation set]])
 
 -- Network
 cmd:text('')
@@ -106,7 +104,7 @@ local function run(model, phase, batchSize, numEpochs, trainData, valData, model
   end
 
   _G.logger:info('Running...')
-  local valLosses = {}
+  --local valLosses = {}
   -- Run numEpochs epochs
   for epoch = 1, numEpochs do
     if not isForwardOnly then
@@ -163,13 +161,8 @@ local function run(model, phase, batchSize, numEpochs, trainData, valData, model
         valNumNonzeros = valNumNonzeros + stats[1]
         valNumCorrect = valNumCorrect + stats[2]
       end -- Run 1 epoch
-      valLosses[epoch] = valLoss
+      model.optim:updateLearningRate(math.exp(valLoss/valNumNonzeros), epoch)
       _G.logger:info('Epoch: %d. Step: %d. Val Accuracy: %f. Val Perplexity: %f', epoch, model.numSteps, valNumCorrect/valNumSamples, math.exp(valLoss/valNumNonzeros))
-      -- Decay learning rate if validation loss does not decrease
-      if valLosses[epoch-1] and valLosses[epoch] > valLosses[epoch-1] then
-        --model.optimState.learningRate = model.optimState.learningRate * learningRateDecay
-        --_G.logger:info('Decay learning rate to %f', model.optimState.learningRate)
-      end
       _G.logger:info('Saving Model')
       local modelPath = paths.concat(modelDir, string.format('model_%d', model.numSteps))
       local modelPathTemp = paths.concat(modelDir, '.model.tmp')

@@ -235,24 +235,24 @@ function model:step(inputBatch, isForwardOnly, beamSize)
     local loss, numCorrect
     numCorrect = 0
     if isForwardOnly then
-      -- Specify how to go one step forward.
-      local advancer = onmt.translate.DecoderAdvancer.new(self.decoder, decoderBatch, context, self.config.maxDecoderLength)
-      
-      -- Conduct beam search.
-      local beamSearcher = onmt.translate.BeamSearcher.new(advancer)
-      local results = beamSearcher:search(beamSize, 1)
-      local predTarget = onmt.utils.Cuda.convert(torch.zeros(batchSize, targetLength)):fill(onmt.Constants.PAD)
-      for b = 1, batchSize do
-        local tokens = results[b][1].tokens
-        for t = 1, #tokens do
-          predTarget[b][t] = tokens[t]
-        end
-      end
-      local predLabels = targetsTensorToLabelStrings(predTarget)
-      local goldLabels = targetsTensorToLabelStrings(targetOutput)
-      local editDistanceRate = evalEditDistanceRate(goldLabels, predLabels)
-      numCorrect = batchSize - editDistanceRate
       if self.outputFile then
+        -- Specify how to go one step forward.
+        local advancer = onmt.translate.DecoderAdvancer.new(self.decoder, decoderBatch, context, self.config.maxDecoderLength)
+        
+        -- Conduct beam search.
+        local beamSearcher = onmt.translate.BeamSearcher.new(advancer)
+        local results = beamSearcher:search(beamSize, 1)
+        local predTarget = onmt.utils.Cuda.convert(torch.zeros(batchSize, targetLength)):fill(onmt.Constants.PAD)
+        for b = 1, batchSize do
+          local tokens = results[b][1].tokens
+          for t = 1, #tokens do
+            predTarget[b][t] = tokens[t]
+          end
+        end
+        local predLabels = targetsTensorToLabelStrings(predTarget)
+        local goldLabels = targetsTensorToLabelStrings(targetOutput)
+        local editDistanceRate = evalEditDistanceRate(goldLabels, predLabels)
+        numCorrect = batchSize - editDistanceRate
         for i = 1, #imagePaths do
           _G.logger:info('%s\t%s\n', imagePaths[i], predLabels[i])
           self.outputFile:write(string.format('%s\t%s\n', imagePaths[i], predLabels[i]))

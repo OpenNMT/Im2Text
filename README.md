@@ -30,8 +30,9 @@ Im2Text consists of two commands:
 ```
 th src/train.lua -phase train -gpu_id 1 -input_feed -model_dir model \
 -image_dir data/images -data_path data/train.txt -val_data_path data/validate.txt -label_path data/labels.txt -vocab_file data/vocab.txt \
--batch_size 8 -beam_size 1 \
--max_num_tokens 150 -max_image_width 500 -max_image_height 160
+-batch_size 20 -beam_size 1 \
+-max_num_tokens 150 -max_image_width 500 -max_image_height 160 \
+-max_grad_norm 20.0 -learning_rate 0.1 -start_decay_at 999
 ```
 
 2) Translate the images.
