@@ -56,8 +56,6 @@ cmd:text('**Optimization**')
 cmd:text('')
 cmd:option('-num_epochs', 15, [[The number of whole data passes]])
 cmd:option('-batch_size', 1, [[Batch size]])
-cmd:option('-learning_rate', 0.1, [[Initial learning rate]])
-cmd:option('-lr_decay', 0.5, [[Decay learning rate by this much if perplexity does not decrease on the validation set]])
 
 -- Network
 cmd:text('')
@@ -80,6 +78,7 @@ cmd:option('-max_image_height', 160, [[Maximum image height]]) --80 / (2*2*2)
 cmd:option('-seed', 910820, [[Load model from model_dir or not]])
 
 onmt.utils.Profiler.declareOpts(cmd)
+onmt.train.Optim.declareOpts(cmd)
 
 local opt = cmd:parse(arg)
 torch.manualSeed(opt.seed)
@@ -90,8 +89,8 @@ local function run(model, phase, batchSize, numEpochs, trainData, valData, model
   local loss = 0
   local numSamples = 0
   local numNonzeros = 0
-  model.optimState.learningRate = model.optimState.learningRate or learningRateInit
-  _G.logger:info('Learning Rate: %f', model.optimState.learningRate)
+  --model.optimState.learningRate = model.optimState.learningRate or learningRateInit
+  --_G.logger:info('Learning Rate: %f', model.optimState.learningRate)
 
   assert(phase == 'train' or phase == 'test', 'phase must be either train or test')
   local isForwardOnly
@@ -105,7 +104,7 @@ local function run(model, phase, batchSize, numEpochs, trainData, valData, model
   end
 
   _G.logger:info('Running...')
-  local valLosses = {}
+  --local valLosses = {}
   -- Run numEpochs epochs
   for epoch = 1, numEpochs do
     if not isForwardOnly then
@@ -162,13 +161,8 @@ local function run(model, phase, batchSize, numEpochs, trainData, valData, model
         valNumNonzeros = valNumNonzeros + stats[1]
         valNumCorrect = valNumCorrect + stats[2]
       end -- Run 1 epoch
-      valLosses[epoch] = valLoss
+      model.optim:updateLearningRate(math.exp(valLoss/valNumNonzeros), epoch)
       _G.logger:info('Epoch: %d. Step: %d. Val Accuracy: %f. Val Perplexity: %f', epoch, model.numSteps, valNumCorrect/valNumSamples, math.exp(valLoss/valNumNonzeros))
-      -- Decay learning rate if validation loss does not decrease
-      if valLosses[epoch-1] and valLosses[epoch] > valLosses[epoch-1] then
-        model.optimState.learningRate = model.optimState.learningRate * learningRateDecay
-        _G.logger:info('Decay learning rate to %f', model.optimState.learningRate)
-      end
       _G.logger:info('Saving Model')
       local modelPath = paths.concat(modelDir, string.format('model_%d', model.numSteps))
       local modelPathTemp = paths.concat(modelDir, '.model.tmp')
@@ -201,9 +195,11 @@ _G.profiler = onmt.utils.Profiler.new(opt.profiler)
   opt.maxEncoderLengthWidth = math.floor(opt.max_image_width / 8.0) -- feature maps after CNN become 8 times smaller
   opt.maxEncoderLengthHeight = math.floor(opt.max_image_height / 8.0) -- feature maps after CNN become 8 times smaller
 
+  local optim = onmt.train.Optim.new(opt)
+
   -- Build Model
   _G.logger:info('Building model')
-  local model = WYGIWYS()
+  local model = WYGIWYS(optim)
   local modelPath = paths.concat(opt.model_dir, 'model_latest')
   if opt.load_model and paths.filep(modelPath) then
     _G.logger:info('Loading model from %s', modelPath)

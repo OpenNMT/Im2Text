@@ -9,7 +9,8 @@ require 'src.cnn'
 local model = torch.class('WYGIWYS')
 
 -- constructor
-function model:__init()
+function model:__init(optim)
+  self.optim = optim
 end
 
 -- in test phase, open a file for predictions
@@ -114,10 +115,6 @@ function model:create(config)
 
   self.numSteps = 0
   self._init = true
-
-  self.optimState = {}
-  self.optimState.learningRate = config.learningRate
-  self.optimState.method = 'sgd'
 
   self:_build()
 end
@@ -238,24 +235,24 @@ function model:step(inputBatch, isForwardOnly, beamSize)
     local loss, numCorrect
     numCorrect = 0
     if isForwardOnly then
-      -- Specify how to go one step forward.
-      local advancer = onmt.translate.DecoderAdvancer.new(self.decoder, decoderBatch, context, self.config.maxDecoderLength)
-      
-      -- Conduct beam search.
-      local beamSearcher = onmt.translate.BeamSearcher.new(advancer)
-      local results = beamSearcher:search(beamSize, 1)
-      local predTarget = onmt.utils.Cuda.convert(torch.zeros(batchSize, targetLength)):fill(onmt.Constants.PAD)
-      for b = 1, batchSize do
-        local tokens = results[b][1].tokens
-        for t = 1, #tokens do
-          predTarget[b][t] = tokens[t]
-        end
-      end
-      local predLabels = targetsTensorToLabelStrings(predTarget)
-      local goldLabels = targetsTensorToLabelStrings(targetOutput)
-      local editDistanceRate = evalEditDistanceRate(goldLabels, predLabels)
-      numCorrect = batchSize - editDistanceRate
       if self.outputFile then
+        -- Specify how to go one step forward.
+        local advancer = onmt.translate.DecoderAdvancer.new(self.decoder, decoderBatch, context, self.config.maxDecoderLength)
+        
+        -- Conduct beam search.
+        local beamSearcher = onmt.translate.BeamSearcher.new(advancer)
+        local results = beamSearcher:search(beamSize, 1)
+        local predTarget = onmt.utils.Cuda.convert(torch.zeros(batchSize, targetLength)):fill(onmt.Constants.PAD)
+        for b = 1, batchSize do
+          local tokens = results[b][1].tokens
+          for t = 1, #tokens do
+            predTarget[b][t] = tokens[t]
+          end
+        end
+        local predLabels = targetsTensorToLabelStrings(predTarget)
+        local goldLabels = targetsTensorToLabelStrings(targetOutput)
+        local editDistanceRate = evalEditDistanceRate(goldLabels, predLabels)
+        numCorrect = batchSize - editDistanceRate
         for i = 1, #imagePaths do
           _G.logger:info('%s\t%s\n', imagePaths[i], predLabels[i])
           self.outputFile:write(string.format('%s\t%s\n', imagePaths[i], predLabels[i]))
@@ -303,11 +300,10 @@ function model:step(inputBatch, isForwardOnly, beamSize)
   end
   if not isForwardOnly then
     -- optimizer
-    local optim = onmt.train.Optim.new(self.optimState)
-    optim:zeroGrad(self.gradParams)
+    self.optim:zeroGrad(self.gradParams)
     local loss, _, stats = feval(self.params)
-    optim:prepareGrad(self.gradParams, 20.0)
-    optim:updateParams(self.params, self.gradParams)
+    self.optim:prepareGrad(self.gradParams, 20.0)
+    self.optim:updateParams(self.params, self.gradParams)
 
     return loss * batchSize, stats
   else
