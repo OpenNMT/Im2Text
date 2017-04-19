@@ -34,10 +34,11 @@ function model:load(modelPath, config)
 
   local checkpoint = torch.load(modelPath)
   local loadedModel, modelConfig = checkpoint[1], checkpoint[2]
-  self.cnn = loadedModel[1]:double()
-  self.encoder = onmt.BiEncoder.load(loadedModel[2])
-  self.decoder = onmt.Decoder.load(loadedModel[3])
-  self.posEmbeddingFw, self.posEmbeddingBw = loadedModel[4]:double(), loadedModel[5]:double()
+  self.models = {}
+  self.models.cnn = loadedModel[1]:double()
+  self.models.encoder = onmt.BiEncoder.load(loadedModel[2])
+  self.models.decoder = onmt.Decoder.load(loadedModel[3])
+  self.models.posEmbeddingFw, self.models.posEmbeddingBw = loadedModel[4]:double(), loadedModel[5]:double()
   self.numSteps = checkpoint[3]
   self.optimState = checkpoint[4]
   _G.idToVocab = checkpoint[5] -- _G.idToVocab is global
@@ -65,10 +66,10 @@ function model:load(modelPath, config)
   local posEmbeddingBw = nn.LookupTable(self.config.maxEncoderLengthHeight, self.config.encoderNumLayers * self.config.encoderNumHidden * 2)
   for i = 1, self.config.maxEncoderLengthHeight do
     local j = math.min(i, modelConfig.maxEncoderLengthHeight)
-    posEmbeddingFw.weight[i] = self.posEmbeddingFw.weight[j]
-    posEmbeddingBw.weight[i] = self.posEmbeddingBw.weight[j]
+    posEmbeddingFw.weight[i] = self.models.posEmbeddingFw.weight[j]
+    posEmbeddingBw.weight[i] = self.models.posEmbeddingBw.weight[j]
   end
-  self.posEmbeddingFw, self.posEmbeddingBw = posEmbeddingFw, posEmbeddingBw
+  self.models.posEmbeddingFw, self.models.posEmbeddingBw = posEmbeddingFw, posEmbeddingBw
   end
 
   -- build model
@@ -94,24 +95,38 @@ function model:create(config)
   self.config.maxDecoderLength = config.maxDecoderLength
 
   -- Create model modules
+  self.models = {}
   -- positional embeddings
-  self.posEmbeddingFw = nn.LookupTable(self.config.maxEncoderLengthHeight, self.config.encoderNumLayers * self.config.encoderNumHidden * 2)
-  self.posEmbeddingBw = nn.LookupTable(self.config.maxEncoderLengthHeight, self.config.encoderNumLayers * self.config.encoderNumHidden * 2)
+  self.models.posEmbeddingFw = nn.LookupTable(self.config.maxEncoderLengthHeight, self.config.encoderNumLayers * self.config.encoderNumHidden * 2)
+  self.models.posEmbeddingBw = nn.LookupTable(self.config.maxEncoderLengthHeight, self.config.encoderNumLayers * self.config.encoderNumHidden * 2)
   -- CNN model, input size: (batchSize, 1, height, width), output size: (batchSize, sequenceLength, cnnFeatureSize)
-  self.cnn = createCNNModel()
+  self.models.cnn = createCNNModel()
   -- biLSTM encoder
-  local encoderRnn = onmt.LSTM.new(self.config.encoderNumLayers, self.config.cnnFeatureSize, self.config.encoderNumHidden, 0.0)
-  self.encoder = onmt.BiEncoder.new(nn.Identity(), encoderRnn, 'concat')
+  --local encoderRnn = onmt.LSTM.new(self.config.encoderNumLayers, self.config.cnnFeatureSize, self.config.encoderNumHidden, 0.0)
+  --self.models.encoder = onmt.BiEncoder.new(config, nn.Identity())
+  local encoderConfig = {layers = self.config.encoderNumLayers, rnn_size = self.config.encoderNumHidden*2,
+    brnn=true, brnn_merge = 'concat', dropout = 0, rnn_type = 'LSTM'}
+  local encoderInputNetwork = nn.Identity()
+  encoderInputNetwork.inputSize = self.config.cnnFeatureSize
+  self.models.encoder = onmt.Factory.buildEncoder(encoderConfig, encoderInputNetwork, false)
 
   -- decoder
   local inputSize = self.config.targetEmbeddingSize
   if self.config.inputFeed then
     inputSize = inputSize + self.config.decoderNumHidden
   end
-  local decoderRnn = onmt.LSTM.new(self.config.decoderNumLayers, inputSize, self.config.decoderNumHidden, 0.0)
   local generator = onmt.Generator.new(self.config.decoderNumHidden, self.config.targetVocabSize)
+  generator:cuda()
   local inputNetwork = onmt.WordEmbedding.new(self.config.targetVocabSize, self.config.targetEmbeddingSize)
-  self.decoder = onmt.Decoder.new(inputNetwork, decoderRnn, generator, self.config.inputFeed)
+  inputNetwork.inputSize = self.config.targetEmbeddingSize
+  local attentionModel = onmt.GlobalAttention({global_attention='general'}, self.config.decoderNumHidden)
+  local inputFeed = 0
+  if self.config.inputFeed then
+    inputFeed = 1
+  end
+  local decoderConfig = {input_feed = inputFeed, layers = self.config.decoderNumLayers, rnn_size = self.config.decoderNumHidden,
+    residual = false, dropout = 0, dropout_input = false}
+  self.models.decoder = onmt.Decoder.new(decoderConfig, inputNetwork, generator, attentionModel)
 
   self.numSteps = 0
   self._init = true
@@ -128,22 +143,18 @@ function model:_build()
   end
 
   -- create criterion
-  self.criterion = nn.ParallelCriterion(false)
-  local weights = torch.ones(self.config.targetVocabSize)
-  weights[onmt.Constants.PAD] = 0
-  local nll = nn.ClassNLLCriterion(weights)
-  nll.sizeAverage = false
-  self.criterion:add(nll)
+  self.criterion = onmt.ParallelClassNLLCriterion({self.config.targetVocabSize})
+  self.criterion:cuda()
 
   -- convert to cuda
-  self.layers = {self.cnn, self.encoder, self.decoder, self.posEmbeddingFw, self.posEmbeddingBw}
+  self.layers = {self.models.cnn, self.models.encoder, self.models.decoder, self.models.posEmbeddingFw, self.models.posEmbeddingBw}
   for i = 1, #self.layers do
     onmt.utils.Cuda.convert(self.layers[i])
   end
   onmt.utils.Cuda.convert(self.criterion)
 
   self.contextProto = onmt.utils.Cuda.convert(torch.zeros(self.config.batchSize, self.config.maxEncoderLengthWidth * self.config.maxEncoderLengthHeight, 2 * self.config.encoderNumHidden))
-  self.cnnGradProto = onmt.utils.Cuda.convert(torch.zeros(self.config.maxEncoderLengthHeight, self.config.batchSize, self.config.maxEncoderLengthWidth, self.config.cnnFeatureSize))
+  self.models.cnnGradProto = onmt.utils.Cuda.convert(torch.zeros(self.config.maxEncoderLengthHeight, self.config.batchSize, self.config.maxEncoderLengthWidth, self.config.cnnFeatureSize))
 
   local numParams = 0
   self.params, self.gradParams = {}, {}
@@ -191,24 +202,24 @@ function model:step(inputBatch, isForwardOnly, beamSize)
 
   -- set phase
   if not isForwardOnly then
-    self.cnn:training()
-    self.encoder:training()
-    self.decoder:training()
-    self.posEmbeddingFw:training()
-    self.posEmbeddingBw:training()
+    self.models.cnn:training()
+    self.models.encoder:training()
+    self.models.decoder:training()
+    self.models.posEmbeddingFw:training()
+    self.models.posEmbeddingBw:training()
   else
-    self.cnn:evaluate()
-    self.encoder:evaluate()
-    self.decoder:evaluate()
-    self.posEmbeddingFw:evaluate()
-    self.posEmbeddingBw:evaluate()
+    self.models.cnn:evaluate()
+    self.models.encoder:evaluate()
+    self.models.decoder:evaluate()
+    self.models.posEmbeddingFw:evaluate()
+    self.models.posEmbeddingBw:evaluate()
   end
 
   -- given parameters, evaluate loss (and optionally calculate gradients)
   local feval = function()
     local targetIn = targetInput:transpose(1,2)
     local targetOut = targetOutput:transpose(1,2)
-    local cnnOutputs = self.cnn:forward(images) -- list of (batchSize, featureMapWidth, cnnFeatureSize)
+    local cnnOutputs = self.models.cnn:forward(images) -- list of (batchSize, featureMapWidth, cnnFeatureSize)
     local featureMapHeight = #cnnOutputs
     local featureMapWidth = cnnOutputs[1]:size(2)
     local context = self.contextProto[{{1, batchSize}, {1, featureMapHeight * featureMapWidth}}]
@@ -217,14 +228,14 @@ function model:step(inputBatch, isForwardOnly, beamSize)
     decoderBatch.sourceSize = onmt.utils.Cuda.convert(torch.IntTensor(batchSize)):fill(context:size(2))
     for i = 1, featureMapHeight do
       local pos = onmt.utils.Cuda.convert(torch.zeros(batchSize)):fill(i)
-      local posEmbeddingFw  = self.posEmbeddingFw:forward(pos):view(1, batchSize, -1) -- (1, batchSize, cnnFeatureSize)
-      local posEmbeddingBw  = self.posEmbeddingBw:forward(pos):view(1, batchSize, -1)
+      local posEmbeddingFw  = self.models.posEmbeddingFw:forward(pos):view(1, batchSize, -1) -- (1, batchSize, cnnFeatureSize)
+      local posEmbeddingBw  = self.models.posEmbeddingBw:forward(pos):view(1, batchSize, -1)
       local cnnOutput = cnnOutputs[i] -- (batchSize, featureMapWidth, cnnFeatureSize)
       local source = cnnOutput:transpose(1, 2) -- (featureMapWidth, batchSize, cnnFeatureSize)
       source = torch.cat(posEmbeddingFw, source, 1)
       source = torch.cat(source, posEmbeddingBw, 1)
       local encoderBatch = Batch():setSourceInput(source)
-      local _, rowContext = self.encoder:forward(encoderBatch)
+      local _, rowContext = self.models.encoder:forward(encoderBatch)
       for t = 1, featureMapWidth do
         local index = (i - 1) * featureMapWidth + t
         context[{{}, index, {}}]:copy(rowContext[{{}, t+1, {}}])
@@ -237,7 +248,7 @@ function model:step(inputBatch, isForwardOnly, beamSize)
     if isForwardOnly then
       if self.outputFile then
         -- Specify how to go one step forward.
-        local advancer = onmt.translate.DecoderAdvancer.new(self.decoder, decoderBatch, context, self.config.maxDecoderLength)
+        local advancer = onmt.translate.DecoderAdvancer.new(self.models.decoder, decoderBatch, context, self.config.maxDecoderLength)
         
         -- Conduct beam search.
         local beamSearcher = onmt.translate.BeamSearcher.new(advancer)
@@ -260,40 +271,40 @@ function model:step(inputBatch, isForwardOnly, beamSize)
         self.outputFile:flush()
       end
       -- get loss
-      self.decoder:maskPadding()
-      loss = self.decoder:computeLoss(decoderBatch, nil, context, self.criterion) / batchSize
+      self.models.decoder:maskPadding()
+      loss = self.models.decoder:computeLoss(decoderBatch, nil, context, self.criterion) / batchSize
     else -- isForwardOnly == false
-      local decoderOutputs = self.decoder:forward(decoderBatch, nil, context)
-      local _, gradContext, totalLoss = self.decoder:backward(decoderBatch, decoderOutputs, self.criterion)
+      local decoderOutputs = self.models.decoder:forward(decoderBatch, nil, context)
+      local _, gradContext, totalLoss = self.models.decoder:backward(decoderBatch, decoderOutputs, self.criterion)
       loss = totalLoss / batchSize
       gradContext = gradContext:contiguous():view(batchSize, featureMapHeight, featureMapWidth, -1) -- (batchSize, featureMapHeight, featureMapWidth, cnnFeatureSize)
       local gradPadding = onmt.utils.Cuda.convert(torch.zeros(batchSize, featureMapHeight, 1, self.config.cnnFeatureSize))
       gradContext = torch.cat(gradPadding, gradContext, 3)
       gradContext = torch.cat(gradContext, gradPadding, 3)
-      local cnnGrad = self.cnnGradProto[{ {1, featureMapHeight}, {1, batchSize}, {1, featureMapWidth}, {} }]
+      local cnnGrad = self.models.cnnGradProto[{ {1, featureMapHeight}, {1, batchSize}, {1, featureMapWidth}, {} }]
       for i = 1, featureMapHeight do
         local cnnOutput = cnnOutputs[i]
         local source = cnnOutput:transpose(1,2)
         local pos = onmt.utils.Cuda.convert(torch.zeros(batchSize)):fill(i)
-        local posEmbeddingFw = self.posEmbeddingFw:forward(pos):view(1, batchSize, -1)
-        local posEmbeddingBw = self.posEmbeddingBw:forward(pos):view(1, batchSize, -1)
+        local posEmbeddingFw = self.models.posEmbeddingFw:forward(pos):view(1, batchSize, -1)
+        local posEmbeddingBw = self.models.posEmbeddingBw:forward(pos):view(1, batchSize, -1)
         source = torch.cat(posEmbeddingFw, source, 1)
         source = torch.cat(source, posEmbeddingBw, 1) -- (featureMapWidth + 2, batchSize, cnnFeatureSize)
         local encoderBatch = Batch():setSourceInput(source)
-        self.encoder:forward(encoderBatch)
-        local rowContextGrad = self.encoder:backward(encoderBatch, nil, gradContext:select(2,i))
+        self.models.encoder:forward(encoderBatch)
+        local rowContextGrad = self.models.encoder:backward(encoderBatch, nil, gradContext:select(2,i))
         for t = 1, featureMapWidth do
           cnnGrad[{i, {}, t, {}}]:copy(rowContextGrad[t + 1])
         end
-        self.posEmbeddingFw:backward(pos, rowContextGrad[1])
-        self.posEmbeddingBw:backward(pos, rowContextGrad[featureMapWidth + 2])
+        self.models.posEmbeddingFw:backward(pos, rowContextGrad[1])
+        self.models.posEmbeddingBw:backward(pos, rowContextGrad[featureMapWidth + 2])
       end
       -- cnn
       cnnGrad = cnnGrad:split(1, 1)
       for i = 1, #cnnGrad do
         cnnGrad[i] = cnnGrad[i]:contiguous():view(batchSize, featureMapWidth, -1)
       end
-      self.cnn:backward(images, cnnGrad)
+      self.models.cnn:backward(images, cnnGrad)
       collectgarbage()
     end
     return loss, self.gradParams, {numNonzeros, numCorrect}
@@ -314,22 +325,22 @@ end
 
 -- Optimize Memory Usage by sharing output and gradInput among clones
 function model:_optimizeMemory()
-  self.encoder:training()
-  self.decoder:training()
+  self.models.encoder:training()
+  self.models.decoder:training()
   _G.logger:info('Preparing memory optimization...')
-  local memoryOptimizer = onmt.utils.MemoryOptimizer.new({self.encoder, self.decoder})
+  local memoryOptimizer = onmt.utils.MemoryOptimizer.new({self.models.encoder, self.models.decoder})
 
   -- Initialize all intermediate tensors with a first batch.
   local source = onmt.utils.Cuda.convert(torch.zeros(1, 1, self.config.cnnFeatureSize))
-  local targetIn = onmt.utils.Cuda.convert(torch.zeros(1, 1))
+  local targetIn = onmt.utils.Cuda.convert(torch.ones(1, 1))
   local targetOut = targetIn:clone()
   local batch = Batch():setSourceInput(source):setTargetInput(targetIn):setTargetOutput(targetOut)
-  self.encoder:forward(batch)
+  self.models.encoder:forward(batch)
   local context = onmt.utils.Cuda.convert(torch.zeros(1, 1, 2 * self.config.encoderNumHidden))
-  local decOutputs = self.decoder:forward(batch, nil, context)
+  local decOutputs = self.models.decoder:forward(batch, nil, context)
   decOutputs = onmt.utils.Tensor.recursiveClone(decOutputs)
-  local _, gradContext = self.decoder:backward(batch, decOutputs, self.criterion)
-  self.encoder:backward(batch, nil, gradContext)
+  local _, gradContext = self.models.decoder:backward(batch, decOutputs, self.criterion)
+  self.models.encoder:backward(batch, nil, gradContext)
 
   local sharedSize, totSize = memoryOptimizer:optimize()
   _G.logger:info(' * sharing %d%% of output/gradInput tensors memory between clones', (sharedSize / totSize)*100)
@@ -340,7 +351,7 @@ function model:save(modelPath)
   for i = 1, #self.layers do
     self.layers[i]:clearState()
   end
-  torch.save(modelPath, {{self.cnn, self.encoder:serialize(), self.decoder:serialize(), self.posEmbeddingFw, self.posEmbeddingBw}, self.config, self.numSteps, self.optimState, _G.idToVocab})
+  torch.save(modelPath, {{self.models.cnn, self.models.encoder:serialize(), self.models.decoder:serialize(), self.models.posEmbeddingFw, self.models.posEmbeddingBw}, self.config, self.numSteps, self.optimState, _G.idToVocab})
 end
 
 -- destructor

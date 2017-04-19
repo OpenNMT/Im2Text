@@ -77,6 +77,7 @@ cmd:option('-max_image_width', 500, [[Maximum image width]]) --800/2/2/2
 cmd:option('-max_image_height', 160, [[Maximum image height]]) --80 / (2*2*2)
 cmd:option('-seed', 910820, [[Load model from model_dir or not]])
 
+--onmt.BiEncoder.declareOpts(cmd)
 onmt.utils.Profiler.declareOpts(cmd)
 onmt.train.Optim.declareOpts(cmd)
 
