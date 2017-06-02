@@ -39,6 +39,7 @@ function DataLoader:__init(imageDir, dataPath, labelPath, maxImageHeight, maxIma
     local imagePath, label = unpack(line:split('[%s]+'))
     self.lines[idx] = tds.Vec({imagePath, label})
   end
+  self.perm = torch.range(1, #self.lines)
   self.cursor = 1
   self.buffer = {}
   collectgarbage()
@@ -47,6 +48,20 @@ end
 function DataLoader:shuffle()
   local perm = torch.randperm(#self.lines)
   self.lines = onmt.utils.Table.reorder(self.lines, perm)
+  self.perm = self.perm:index(1, perm:type('torch.LongTensor'))
+end
+
+function DataLoader:load(dataPath)
+  assert(paths.filep(dataPath), string.format('Data file %s does not exist!', dataPath))
+  local s
+  self.perm, self.cursor, self.buffer, self.epoch, s = table.unpack(torch.load(dataPath))
+  self.lines = onmt.utils.Table.reorder(self.lines, self.perm)
+  torch.setRNGState(s)
+end
+
+function DataLoader:save(dataPath)
+  local s = torch.getRNGState()
+  torch.save(dataPath, {self.perm, self.cursor, self.buffer, self.epoch, s})
 end
 
 function DataLoader:size()

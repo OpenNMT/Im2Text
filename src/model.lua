@@ -40,8 +40,9 @@ function model:load(modelPath, config)
   self.models.decoder = onmt.Decoder.load(loadedModel[3])
   self.models.posEmbeddingFw, self.models.posEmbeddingBw = loadedModel[4]:double(), loadedModel[5]:double()
   self.numSteps = checkpoint[3]
-  self.optimState = checkpoint[4]
-  _G.idToVocab = checkpoint[5] -- _G.idToVocab is global
+  self.numSamples = checkpoint[4]
+  self.optim = checkpoint[5]
+  _G.idToVocab = checkpoint[6] -- _G.idToVocab is global
 
   -- Load model structure parameters
   self.config = {}
@@ -59,6 +60,10 @@ function model:load(modelPath, config)
   self.config.maxEncoderLengthHeight = config.maxEncoderLengthHeight or modelConfig.maxEncoderLengthHeight
   self.config.maxDecoderLength = config.maxDecoderLength or modelConfig.maxDecoderLength
   self.config.batchSize = config.batch_size or modelConfig.batchSize
+  self.config.valBatchSize = config.val_batch_size or modelConfig.val_batchSize or self.config.batchSize
+
+  self.config.maxImageWidth = config.max_image_width or modelConfig.max_image_width
+  self.config.maxImageHeight = config.max_image_height or modelConfig.max_image_height
 
   -- If we want to allow higher images, since the trained positional embeddings are valid only up to modelConfig.maxEncoderLengthHeight, we use the largest available one to initialize the invalid embdddings
   if self.config.maxEncoderLengthHeight > modelConfig.maxEncoderLengthHeight then
@@ -72,17 +77,21 @@ function model:load(modelPath, config)
   self.models.posEmbeddingFw, self.models.posEmbeddingBw = posEmbeddingFw, posEmbeddingBw
   end
 
+  self.config.no_stress_test = config.no_stress_test
+
   -- build model
   self:_build()
 end
 
 -- create model with fresh parameters
 function model:create(config)
+  self.optim = onmt.train.Optim.new(config)
   -- set parameters
   self.config = {}
   self.config.phase = config.phase
   self.config.cnnFeatureSize = 512
   self.config.batchSize = config.batch_size
+  self.config.valBatchSize = config.val_batch_size
   self.config.inputFeed = config.input_feed
   self.config.encoderNumHidden = config.encoder_num_hidden
   self.config.encoderNumLayers = config.encoder_num_layers
@@ -93,6 +102,8 @@ function model:create(config)
   self.config.maxEncoderLengthWidth = config.maxEncoderLengthWidth
   self.config.maxEncoderLengthHeight = config.maxEncoderLengthHeight
   self.config.maxDecoderLength = config.maxDecoderLength
+  self.config.maxImageWidth = config.max_image_width
+  self.config.maxImageHeight = config.max_image_height
 
   -- Create model modules
   self.models = {}
@@ -129,6 +140,8 @@ function model:create(config)
   self.models.decoder = onmt.Decoder.new(decoderConfig, inputNetwork, generator, attentionModel)
 
   self.numSteps = 0
+  self.numSamples = 0
+  self.config.no_stress_test = config.no_stress_test
   self._init = true
 
   self:_build()
@@ -144,17 +157,18 @@ function model:_build()
 
   -- create criterion
   self.criterion = onmt.ParallelClassNLLCriterion({self.config.targetVocabSize})
-  self.criterion:cuda()
+  onmt.utils.Cuda.convert(self.criterion)
 
   -- convert to cuda
   self.layers = {self.models.cnn, self.models.encoder, self.models.decoder, self.models.posEmbeddingFw, self.models.posEmbeddingBw}
-  for i = 1, #self.layers do
+  self.models.cnn:cuda()
+  for i = 2, #self.layers do
     onmt.utils.Cuda.convert(self.layers[i])
   end
   onmt.utils.Cuda.convert(self.criterion)
 
-  self.contextProto = onmt.utils.Cuda.convert(torch.zeros(self.config.batchSize, self.config.maxEncoderLengthWidth * self.config.maxEncoderLengthHeight, 2 * self.config.encoderNumHidden))
-  self.models.cnnGradProto = onmt.utils.Cuda.convert(torch.zeros(self.config.maxEncoderLengthHeight, self.config.batchSize, self.config.maxEncoderLengthWidth, self.config.cnnFeatureSize))
+  self.contextProto = onmt.utils.Cuda.convert(torch.zeros(math.max(self.config.batchSize,self.config.valBatchSize or 0), self.config.maxEncoderLengthWidth * self.config.maxEncoderLengthHeight, 2 * self.config.encoderNumHidden))
+  self.cnnGradProto = onmt.utils.Cuda.convert(torch.zeros(self.config.maxEncoderLengthHeight, self.config.batchSize, self.config.maxEncoderLengthWidth, self.config.cnnFeatureSize))
 
   local numParams = 0
   self.params, self.gradParams = {}, {}
@@ -171,15 +185,38 @@ function model:_build()
 
   if self.config.phase == 'train' then
     self:_optimizeMemory()
+    if not self.config.no_stress_test then
+      self:_stressTest()
+    end
   end
   collectgarbage()
 end
 
+function model:_stressTest()
+  _G.logger:info('Stress Test starts')
+  local s = torch.getRNGState()
+  local images = torch.rand(self.config.batchSize, 1, self.config.maxImageHeight, self.config.maxImageWidth)
+  local targetInput = torch.IntTensor(self.config.batchSize, self.config.maxDecoderLength):fill(onmt.Constants.PAD)
+  local targetOutput = torch.IntTensor(self.config.batchSize, self.config.maxDecoderLength):fill(onmt.Constants.PAD)
+  local numNonzeros = 1
+  local inputBatch = {images, targetInput, targetOutput, numNonzeros, {}}
+  self:step(inputBatch, false, 1)
+  images = torch.rand(self.config.valBatchSize, 1, self.config.maxImageHeight, self.config.maxImageWidth)
+  targetInput = torch.IntTensor(self.config.valBatchSize, self.config.maxDecoderLength):fill(onmt.Constants.PAD)
+  targetOutput = torch.IntTensor(self.config.valBatchSize, self.config.maxDecoderLength):fill(onmt.Constants.PAD)
+  inputBatch = {images, targetInput, targetOutput, numNonzeros, {}}
+  self:step(inputBatch, true, 1, true)
+  torch.setRNGState(s)
+  _G.logger:info('Stress Test ends')
+end
+
 -- one step forward (and optionally backward)
-function model:step(inputBatch, isForwardOnly, beamSize)
+function model:step(inputBatch, isForwardOnly, beamSize, mute)
+  mute = mute or false
   beamSize = beamSize or 1 -- default greedy decoding
   assert (beamSize <= self.config.targetVocabSize)
-  local images = onmt.utils.Cuda.convert(inputBatch[1])
+  --local images = onmt.utils.Cuda.convert(inputBatch[1])
+  local images = inputBatch[1]:cuda()
   local targetInput = onmt.utils.Cuda.convert(inputBatch[2])
   local targetOutput = onmt.utils.Cuda.convert(inputBatch[3])
   local numNonzeros = inputBatch[4]
@@ -220,6 +257,9 @@ function model:step(inputBatch, isForwardOnly, beamSize)
     local targetIn = targetInput:transpose(1,2)
     local targetOut = targetOutput:transpose(1,2)
     local cnnOutputs = self.models.cnn:forward(images) -- list of (batchSize, featureMapWidth, cnnFeatureSize)
+    for i = 1, #cnnOutputs do
+      cnnOutputs[i] = onmt.utils.Cuda.convert(cnnOutputs[i])
+    end
     local featureMapHeight = #cnnOutputs
     local featureMapWidth = cnnOutputs[1]:size(2)
     local context = self.contextProto[{{1, batchSize}, {1, featureMapHeight * featureMapWidth}}]
@@ -228,17 +268,27 @@ function model:step(inputBatch, isForwardOnly, beamSize)
     decoderBatch.sourceSize = onmt.utils.Cuda.convert(torch.IntTensor(batchSize)):fill(context:size(2))
     for i = 1, featureMapHeight do
       local pos = onmt.utils.Cuda.convert(torch.zeros(batchSize)):fill(i)
-      local posEmbeddingFw  = self.models.posEmbeddingFw:forward(pos):view(1, batchSize, -1) -- (1, batchSize, cnnFeatureSize)
-      local posEmbeddingBw  = self.models.posEmbeddingBw:forward(pos):view(1, batchSize, -1)
+      local posEmbeddingFw  = self.models.posEmbeddingFw:forward(pos):view(batchSize, -1) -- (1, batchSize, encoderNumLayers*2*encoderNumHidden)
+      local posEmbeddingBw  = self.models.posEmbeddingBw:forward(pos):view(batchSize, -1)  -- (1, batchSize, encoderNumLayers*2*encoderNumHidden)
       local cnnOutput = cnnOutputs[i] -- (batchSize, featureMapWidth, cnnFeatureSize)
       local source = cnnOutput:transpose(1, 2) -- (featureMapWidth, batchSize, cnnFeatureSize)
-      source = torch.cat(posEmbeddingFw, source, 1)
-      source = torch.cat(source, posEmbeddingBw, 1)
       local encoderBatch = Batch():setSourceInput(source)
-      local _, rowContext = self.models.encoder:forward(encoderBatch)
+      local encoderStatesFw = onmt.utils.Tensor.initTensorTable(self.config.encoderNumLayers*2,
+                                                         onmt.utils.Cuda.convert(torch.Tensor()),
+                                                         { batchSize,  self.config.encoderNumHidden})
+      for k = 1, #encoderStatesFw do
+        encoderStatesFw[k]:copy(posEmbeddingFw[{{}, {(k-1)*self.config.encoderNumHidden+1, k*self.config.encoderNumHidden}}])
+      end
+      local encoderStatesBw = onmt.utils.Tensor.initTensorTable(self.config.encoderNumLayers*2,
+                                                         onmt.utils.Cuda.convert(torch.Tensor()),
+                                                         { batchSize,  self.config.encoderNumHidden})
+      for k = 1, #encoderStatesBw do
+        encoderStatesBw[k]:copy(posEmbeddingBw[{{}, {(k-1)*self.config.encoderNumHidden+1, k*self.config.encoderNumHidden}}])
+      end
+      local _, rowContext = self.models.encoder:forward(encoderBatch, encoderStatesFw, encoderStatesBw)
       for t = 1, featureMapWidth do
         local index = (i - 1) * featureMapWidth + t
-        context[{{}, index, {}}]:copy(rowContext[{{}, t+1, {}}])
+        context[{{}, index, {}}]:copy(rowContext[{{}, t, {}}])
       end
     end
 
@@ -256,7 +306,7 @@ function model:step(inputBatch, isForwardOnly, beamSize)
         local predTarget = onmt.utils.Cuda.convert(torch.zeros(batchSize, targetLength)):fill(onmt.Constants.PAD)
         for b = 1, batchSize do
           local tokens = results[b][1].tokens
-          for t = 1, #tokens do
+          for t = 1, math.min(#tokens, targetLength) do
             predTarget[b][t] = tokens[t]
           end
         end
@@ -264,11 +314,13 @@ function model:step(inputBatch, isForwardOnly, beamSize)
         local goldLabels = targetsTensorToLabelStrings(targetOutput)
         local editDistanceRate = evalEditDistanceRate(goldLabels, predLabels)
         numCorrect = batchSize - editDistanceRate
-        for i = 1, #imagePaths do
-          _G.logger:info('%s\t%s\n', imagePaths[i], predLabels[i])
-          self.outputFile:write(string.format('%s\t%s\n', imagePaths[i], predLabels[i]))
+        if not mute then
+          for i = 1, #imagePaths do
+            _G.logger:info('%s\t%s\n', imagePaths[i], predLabels[i])
+            self.outputFile:write(string.format('%s\t%s\n', imagePaths[i], predLabels[i]))
+          end
+          self.outputFile:flush()
         end
-        self.outputFile:flush()
       end
       -- get loss
       self.models.decoder:maskPadding()
@@ -278,31 +330,46 @@ function model:step(inputBatch, isForwardOnly, beamSize)
       local _, gradContext, totalLoss = self.models.decoder:backward(decoderBatch, decoderOutputs, self.criterion)
       loss = totalLoss / batchSize
       gradContext = gradContext:contiguous():view(batchSize, featureMapHeight, featureMapWidth, -1) -- (batchSize, featureMapHeight, featureMapWidth, cnnFeatureSize)
-      local gradPadding = onmt.utils.Cuda.convert(torch.zeros(batchSize, featureMapHeight, 1, self.config.cnnFeatureSize))
-      gradContext = torch.cat(gradPadding, gradContext, 3)
-      gradContext = torch.cat(gradContext, gradPadding, 3)
-      local cnnGrad = self.models.cnnGradProto[{ {1, featureMapHeight}, {1, batchSize}, {1, featureMapWidth}, {} }]
+      local cnnGrad = self.cnnGradProto[{ {1, featureMapHeight}, {1, batchSize}, {1, featureMapWidth}, {} }]
       for i = 1, featureMapHeight do
         local cnnOutput = cnnOutputs[i]
         local source = cnnOutput:transpose(1,2)
         local pos = onmt.utils.Cuda.convert(torch.zeros(batchSize)):fill(i)
-        local posEmbeddingFw = self.models.posEmbeddingFw:forward(pos):view(1, batchSize, -1)
-        local posEmbeddingBw = self.models.posEmbeddingBw:forward(pos):view(1, batchSize, -1)
-        source = torch.cat(posEmbeddingFw, source, 1)
-        source = torch.cat(source, posEmbeddingBw, 1) -- (featureMapWidth + 2, batchSize, cnnFeatureSize)
-        local encoderBatch = Batch():setSourceInput(source)
-        self.models.encoder:forward(encoderBatch)
-        local rowContextGrad = self.models.encoder:backward(encoderBatch, nil, gradContext:select(2,i))
-        for t = 1, featureMapWidth do
-          cnnGrad[{i, {}, t, {}}]:copy(rowContextGrad[t + 1])
+        local posEmbeddingFw = self.models.posEmbeddingFw:forward(pos):view(batchSize, -1)
+        local posEmbeddingBw = self.models.posEmbeddingBw:forward(pos):view(batchSize, -1)
+        local encoderStatesFw = onmt.utils.Tensor.initTensorTable(self.config.encoderNumLayers*2,
+                                                           onmt.utils.Cuda.convert(torch.Tensor()),
+                                                           { batchSize,  self.config.encoderNumHidden})
+        for k = 1, #encoderStatesFw do
+          encoderStatesFw[k]:copy(posEmbeddingFw[{{}, {(k-1)*self.config.encoderNumHidden+1, k*self.config.encoderNumHidden}}])
         end
-        self.models.posEmbeddingFw:backward(pos, rowContextGrad[1])
-        self.models.posEmbeddingBw:backward(pos, rowContextGrad[featureMapWidth + 2])
+        local encoderStatesBw = onmt.utils.Tensor.initTensorTable(self.config.encoderNumLayers*2,
+                                                           onmt.utils.Cuda.convert(torch.Tensor()),
+                                                           { batchSize,  self.config.encoderNumHidden})
+        for k = 1, #encoderStatesBw do
+          encoderStatesBw[k]:copy(posEmbeddingBw[{{}, {(k-1)*self.config.encoderNumHidden+1, k*self.config.encoderNumHidden}}])
+        end
+        local encoderBatch = Batch():setSourceInput(source)
+        self.models.encoder:forward(encoderBatch, encoderStatesFw, encoderStatesBw)
+        local rowContextGrad, posEmbeddingGrad = self.models.encoder:backward(encoderBatch, nil, gradContext:select(2,i))
+        for t = 1, featureMapWidth do
+          cnnGrad[{i, {}, t, {}}]:copy(rowContextGrad[t])
+        end
+        local posEmbeddingGradFw = onmt.utils.Cuda.convert(torch.zeros(batchSize, self.config.encoderNumLayers*2*self.config.encoderNumHidden))
+        for k = 1, 2*self.config.encoderNumLayers do
+          posEmbeddingGradFw[{{}, {(k-1)*self.config.encoderNumHidden+1, k*self.config.encoderNumHidden}}]:copy(posEmbeddingGrad[k])
+        end
+        self.models.posEmbeddingFw:backward(pos, posEmbeddingGradFw)
+        for k = 1, 2*self.config.encoderNumLayers do
+          posEmbeddingGradFw[{{}, {(k-1)*self.config.encoderNumHidden+1, k*self.config.encoderNumHidden}}]:copy(posEmbeddingGrad[k+2*self.config.encoderNumLayers])
+        end
+        
+        self.models.posEmbeddingBw:backward(pos, posEmbeddingGradFw)
       end
       -- cnn
       cnnGrad = cnnGrad:split(1, 1)
       for i = 1, #cnnGrad do
-        cnnGrad[i] = cnnGrad[i]:contiguous():view(batchSize, featureMapWidth, -1)
+        cnnGrad[i] = cnnGrad[i]:contiguous():view(batchSize, featureMapWidth, -1):type('torch.CudaTensor')
       end
       self.models.cnn:backward(images, cnnGrad)
       collectgarbage()
@@ -313,8 +380,17 @@ function model:step(inputBatch, isForwardOnly, beamSize)
     -- optimizer
     self.optim:zeroGrad(self.gradParams)
     local loss, _, stats = feval(self.params)
-    self.optim:prepareGrad(self.gradParams, 20.0)
-    self.optim:updateParams(self.params, self.gradParams)
+    local flagNan = false
+    for i = 1, #self.gradParams do
+      if self.gradParams[i]:ne(self.gradParams[i]):any() then
+        flagNan = true
+        _G.logger:warning('nans detected in gradients!')
+      end
+    end
+    if not flagNan then
+      self.optim:prepareGrad(self.gradParams, 20.0)
+      self.optim:updateParams(self.params, self.gradParams)
+    end
 
     return loss * batchSize, stats
   else
@@ -351,7 +427,7 @@ function model:save(modelPath)
   for i = 1, #self.layers do
     self.layers[i]:clearState()
   end
-  torch.save(modelPath, {{self.models.cnn, self.models.encoder:serialize(), self.models.decoder:serialize(), self.models.posEmbeddingFw, self.models.posEmbeddingBw}, self.config, self.numSteps, self.optimState, _G.idToVocab})
+  torch.save(modelPath, {{self.models.cnn, self.models.encoder:serialize(), self.models.decoder:serialize(), self.models.posEmbeddingFw, self.models.posEmbeddingBw}, self.config, self.numSteps, self.numSamples, self.optim, _G.idToVocab})
 end
 
 -- destructor

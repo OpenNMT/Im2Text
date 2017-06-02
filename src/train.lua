@@ -30,6 +30,7 @@ cmd:text('**Control**')
 cmd:text('')
 cmd:option('-phase', 'test', [[train or test]])
 cmd:option('-load_model', false, [[Load model from model_dir or not]])
+cmd:option('-no_stress_test', false, [[]])
 cmd:option('-gpu_id', 1, [[Which gpu to use]])
 
 cmd:text('')
@@ -47,7 +48,7 @@ cmd:option('-output_dir', 'results', [[The path to put results]])
 cmd:text('')
 cmd:text('**Display**')
 cmd:text('')
-cmd:option('-steps_per_checkpoint', 100, [[Checkpointing (print perplexity, save model) per how many steps]])
+cmd:option('-steps_per_checkpoint', 10, [[Checkpointing (print perplexity, save model) per how many steps]])
 cmd:option('-log_path', 'log.txt', [[The path to put log]])
 
 -- Optimization
@@ -56,6 +57,7 @@ cmd:text('**Optimization**')
 cmd:text('')
 cmd:option('-num_epochs', 15, [[The number of whole data passes]])
 cmd:option('-batch_size', 1, [[Batch size]])
+cmd:option('-val_batch_size', 10, [[Batch size]])
 
 -- Network
 cmd:text('')
@@ -75,7 +77,8 @@ cmd:option('-beam_size', 1, [[Beam size for decoding]])
 cmd:option('-max_num_tokens', 150, [[Maximum number of output tokens]]) -- when evaluate, this is the cut-off length.
 cmd:option('-max_image_width', 500, [[Maximum image width]]) --800/2/2/2
 cmd:option('-max_image_height', 160, [[Maximum image height]]) --80 / (2*2*2)
-cmd:option('-seed', 910820, [[Load model from model_dir or not]])
+cmd:option('-seed', 920110, [[Load model from model_dir or not]])
+cmd:option('-fp16', false, [[Use half-precision float on GPU]])
 
 --onmt.BiEncoder.declareOpts(cmd)
 onmt.utils.Profiler.declareOpts(cmd)
@@ -86,7 +89,43 @@ torch.manualSeed(opt.seed)
 math.randomseed(opt.seed)
 cutorch.manualSeed(opt.seed)
 
-local function run(model, phase, batchSize, numEpochs, trainData, valData, modelDir, stepsPerCheckpoint, beamSize, outputDir, learningRateInit, learningRateDecay)
+local function evaluateModel(model, valData, valBatchSize, beamSize, modelDir, epoch, epochEnd)
+  local valLoss, valNumSamples, valNumNonzeros = 0, 0, 0
+  -- Run 1 epoch on validation data
+  while true do
+    local valBatch = valData:nextBatch(valBatchSize)
+    if valBatch == nil then
+      break
+    end
+    local actualBatchSize = valBatch[1]:size(1)
+    local stepLoss, stats = model:step(valBatch, true, beamSize)
+    valLoss = valLoss + stepLoss
+    valNumSamples = valNumSamples + actualBatchSize
+    valNumNonzeros = valNumNonzeros + stats[1]
+  end -- Run 1 epoch
+  local ppl = math.exp(valLoss/valNumNonzeros)
+  if not epochEnd then
+    _G.logger:info('Epoch: %d. Step: %d. #Sample: %d. Val Perplexity: %f', epoch, model.numSteps, model.numSamples, ppl)
+  else
+    _G.logger:info('Epoch (square): %d. Step: %d. #Sample: %d. Val Perplexity: %f', epoch, model.numSteps, model.numSamples, ppl)
+  end
+  return ppl
+end
+
+local function saveModel(modelDir, model, trainData)
+  _G.logger:info('Saving Model')
+  local modelPath = paths.concat(modelDir, string.format('model_%d', model.numSteps))
+  local modelPathTemp = paths.concat(modelDir, '.model.tmp')
+  local modelPathLatest = paths.concat(modelDir, 'model_latest')
+  model:save(modelPath)
+  local dataPath = paths.concat(modelDir, string.format('model_%d-data', model.numSteps or 0))
+  trainData:save(dataPath)
+  _G.logger:info('Model saved to %s', modelPath)
+  os.execute(string.format('cp %s %s', modelPath, modelPathTemp))
+  os.execute(string.format('mv %s %s', modelPathTemp, modelPathLatest))
+end
+
+local function run(model, phase, batchSize, valBatchSize, numEpochs, trainData, valData, modelDir, stepsPerCheckpoint, beamSize, outputDir, learningRateInit, learningRateDecay)
   local loss = 0
   local numSamples = 0
   local numNonzeros = 0
@@ -101,16 +140,23 @@ local function run(model, phase, batchSize, numEpochs, trainData, valData, model
     isForwardOnly = true
     numEpochs = 1
     model.numSteps = 0
+    model.numSamples = 0
     model:setOutputDirectory(outputDir)
   end
 
   _G.logger:info('Running...')
   --local valLosses = {}
   -- Run numEpochs epochs
-  for epoch = 1, numEpochs do
+  if not trainData.epoch then
+    trainData.epoch = 1
     if not isForwardOnly then
       trainData:shuffle()
     end
+    _G.logger:info('Learning rate: %f', model.optim.args.learning_rate)
+  end
+
+  local epoch = trainData.epoch
+  while epoch <= numEpochs do
     -- Run 1 epoch
     while true do
       local trainBatch = trainData:nextBatch(batchSize)
@@ -122,66 +168,49 @@ local function run(model, phase, batchSize, numEpochs, trainData, valData, model
       if not isForwardOnly then
         _G.logger:info('step perplexity: %f', math.exp(stepLoss/stats[1]))
       end
-      numSamples = numSamples + actualBatchSize
       numNonzeros = numNonzeros + stats[1]
       loss = loss + stepLoss
       model.numSteps = model.numSteps + 1
+      model.numSamples = model.numSamples + actualBatchSize
       if model.numSteps % stepsPerCheckpoint == 0 then
         if isForwardOnly then
-          _G.logger:info('Step: %d. Number of samples: %d.', model.numSteps, numSamples)
+          _G.logger:info('Step: %d. Number of samples: %d.', model.numSteps, model.numSamples)
         else
-          _G.logger:info('Step: %d. Training Perplexity: %f', model.numSteps, math.exp(loss/numNonzeros))
-          _G.logger:info('Saving Model')
-          local modelPath = paths.concat(modelDir, string.format('model_%d', model.numSteps))
-          local modelPathTemp = paths.concat(modelDir, '.model.tmp') -- to ensure atomic operation
-          local modelPathLatest = paths.concat(modelDir, 'model_latest')
-          model:save(modelPath)
-          _G.logger:info('Model saved to %s', modelPath)
-          os.execute(string.format('cp %s %s', modelPath, modelPathTemp))
-          os.execute(string.format('mv %s %s', modelPathTemp, modelPathLatest))
-
+          _G.logger:info('Step: %d. #Sample: %d. Training Perplexity: %f', model.numSteps, model.numSamples, math.exp(loss/numNonzeros))
+          _G.logger:info('Evaluating model on validation data')
+          local ppl = evaluateModel(model, valData, valBatchSize, beamSize, modelDir, epoch)
+          local learningRateOld = model.optim.args.learning_rate
+          model.optim:updateLearningRate(ppl, -math.huge)
+          local learningRate = model.optim.args.learning_rate
+          if learningRate < learningRateOld then
+            _G.logger:info('Decay learning rate to %f', learningRate)
+          end
+          saveModel(modelDir, model, trainData)
           loss, numNonzeros = 0, 0
           collectgarbage()
         end
       end
     end -- Run 1 epoch
+    if not isForwardOnly then
+      trainData:shuffle()
+    end
     -- After each epoch, evaluate on validation if phase is train
     if not isForwardOnly then
       _G.logger:info('Evaluating model on validation data')
-      local valLoss, valNumSamples, valNumNonzeros, valNumCorrect = 0, 0, 0, 0
-      -- Run 1 epoch on validation data
-      while true do
-        local valBatch = valData:nextBatch(batchSize)
-        if valBatch == nil then
-          break
-        end
-        local actualBatchSize = valBatch[1]:size(1)
-        local stepLoss, stats = model:step(valBatch, true, beamSize)
-        valLoss = valLoss + stepLoss
-        valNumSamples = valNumSamples + actualBatchSize
-        valNumNonzeros = valNumNonzeros + stats[1]
-        valNumCorrect = valNumCorrect + stats[2]
-      end -- Run 1 epoch
-      model.optim:updateLearningRate(math.exp(valLoss/valNumNonzeros), epoch)
-      _G.logger:info('Epoch: %d. Step: %d. Val Accuracy: %f. Val Perplexity: %f', epoch, model.numSteps, valNumCorrect/valNumSamples, math.exp(valLoss/valNumNonzeros))
-      _G.logger:info('Saving Model')
-      local modelPath = paths.concat(modelDir, string.format('model_%d', model.numSteps))
-      local modelPathTemp = paths.concat(modelDir, '.model.tmp')
-      local modelPathLatest = paths.concat(modelDir, 'model_latest')
-      model:save(modelPath)
-      _G.logger:info('Model saved to %s', modelPath)
-      os.execute(string.format('cp %s %s', modelPath, modelPathTemp))
-      os.execute(string.format('mv %s %s', modelPathTemp, modelPathLatest))
+      evaluateModel(model, valData, valBatchSize, beamSize, modelDir, epoch, true)
+      saveModel(modelDir, model, trainData)
     else -- isForwardOnly == true
       _G.logger:info('Epoch ends. Number of samples: %d.', numSamples)
     end
+    epoch = epoch + 1
+    trainData.epoch = epoch
   end -- for epoch
 end -- run function
 
 local function main()
   assert (opt.gpu_id > 0, 'Only support using GPU! Please specify a valid gpu_id.')
 
-_G.profiler = onmt.utils.Profiler.new(opt.profiler)
+  _G.profiler = onmt.utils.Profiler.new(opt.profiler)
   _G.logger = onmt.utils.Logger.new(opt.log_path)
   _G.logger.mute = false
   _G.logger:info('Command Line Arguments: %s', table.concat(arg, ' ') or '')
@@ -189,14 +218,12 @@ _G.profiler = onmt.utils.Profiler.new(opt.profiler)
   local gpuId = opt.gpu_id
   _G.logger:info('Using CUDA on GPU %d', gpuId)
   cutorch.setDevice(gpuId)
-  onmt.utils.Cuda.init({gpuid=string.format('%d', gpuId)})
+  onmt.utils.Cuda.init({gpuid=string.format('%d', gpuId), fp16 = opt.fp16})
 
   -- Convert Options
   opt.maxDecoderLength = opt.max_num_tokens + 1 -- since <StartOfSequence> is prepended to the sequence
   opt.maxEncoderLengthWidth = math.floor(opt.max_image_width / 8.0) -- feature maps after CNN become 8 times smaller
   opt.maxEncoderLengthHeight = math.floor(opt.max_image_height / 8.0) -- feature maps after CNN become 8 times smaller
-
-  local optim = onmt.train.Optim.new(opt)
 
   -- Build Model
   _G.logger:info('Building model')
@@ -238,6 +265,11 @@ _G.profiler = onmt.utils.Profiler.new(opt.profiler)
       os.exit(1)
   end
   local trainData = DataLoader(opt.image_dir, opt.data_path, opt.label_path, opt.max_image_height, opt.max_image_width, opt.max_num_tokens)
+  local dataPath = paths.concat(opt.model_dir, string.format('model_%d-data', model.numSteps or 0))
+  if opt.load_model and paths.filep(dataPath) then
+    _G.logger:info('Loading data state from %s', dataPath)
+    trainData:load(dataPath)
+  end
   _G.logger:info('Loaded')
   local valData
   if opt.phase == 'train' then
@@ -247,7 +279,7 @@ _G.profiler = onmt.utils.Profiler.new(opt.profiler)
   end
 
   -- Run Model
-  run(model, opt.phase, opt.batch_size, opt.num_epochs, trainData, valData, opt.model_dir, opt.steps_per_checkpoint, opt.beam_size, opt.output_dir, opt.learning_rate, opt.lr_decay)
+  run(model, opt.phase, opt.batch_size, opt.val_batch_size or opt.batch_size, opt.num_epochs, trainData, valData, opt.model_dir, opt.steps_per_checkpoint, opt.beam_size, opt.output_dir, opt.learning_rate, opt.lr_decay)
 
   model:shutDown()
   _G.logger:shutDown()
