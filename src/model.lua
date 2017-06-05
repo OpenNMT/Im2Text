@@ -388,7 +388,7 @@ function model:step(inputBatch, isForwardOnly, beamSize, mute)
       end
     end
     if not flagNan then
-      self.optim:prepareGrad(self.gradParams, 20.0)
+      self.optim:prepareGrad(self.gradParams)
       self.optim:updateParams(self.params, self.gradParams)
     end
 
