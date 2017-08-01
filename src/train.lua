@@ -6,14 +6,14 @@ require 'cunn'
 require 'cutorch'
 require 'cudnn'
 require 'paths'
-local status = pcall(function() require('onmt') end)
+local status = pcall(function() require('opennmt.init') end)
 if not status then
   print('OpenNMT not found. Please enter the path to OpenNMT: ')
   local onmtPath = io.read()
   package.path = package.path .. ';' .. paths.concat(onmtPath, '?.lua')
-  status = pcall(function() require('onmt.init') end)
+  status = pcall(function() require('opennmt.init') end)
   if not status then
-    print ('Error: onmt not found in the specified path!')
+    print ('Error: opennmt not found in the specified path!')
     os.exit(1)
   end
 end
@@ -48,7 +48,7 @@ cmd:option('-output_dir', 'results', [[The path to put results]])
 cmd:text('')
 cmd:text('**Display**')
 cmd:text('')
-cmd:option('-steps_per_checkpoint', 10, [[Checkpointing (print perplexity, save model) per how many steps]])
+cmd:option('-steps_per_checkpoint', 100, [[Checkpointing (print perplexity, save model) per how many steps]])
 cmd:option('-log_path', 'log.txt', [[The path to put log]])
 
 -- Optimization
@@ -129,8 +129,6 @@ local function run(model, phase, batchSize, valBatchSize, numEpochs, trainData, 
   local loss = 0
   local numSamples = 0
   local numNonzeros = 0
-  --model.optimState.learningRate = model.optimState.learningRate or learningRateInit
-  --_G.logger:info('Learning Rate: %f', model.optimState.learningRate)
 
   assert(phase == 'train' or phase == 'test', 'phase must be either train or test')
   local isForwardOnly
@@ -177,14 +175,8 @@ local function run(model, phase, batchSize, valBatchSize, numEpochs, trainData, 
           _G.logger:info('Step: %d. Number of samples: %d.', model.numSteps, model.numSamples)
         else
           _G.logger:info('Step: %d. #Sample: %d. Training Perplexity: %f', model.numSteps, model.numSamples, math.exp(loss/numNonzeros))
-          _G.logger:info('Evaluating model on validation data')
-          local ppl = evaluateModel(model, valData, valBatchSize, beamSize, modelDir, epoch)
-          local learningRateOld = model.optim.args.learning_rate
-          model.optim:updateLearningRate(ppl, -math.huge)
-          local learningRate = model.optim.args.learning_rate
-          if learningRate < learningRateOld then
-            _G.logger:info('Decay learning rate to %f', learningRate)
-          end
+          --_G.logger:info('Evaluating model on validation data')
+          --local ppl = evaluateModel(model, valData, valBatchSize, beamSize, modelDir, epoch)
           saveModel(modelDir, model, trainData)
           loss, numNonzeros = 0, 0
           collectgarbage()
@@ -197,7 +189,13 @@ local function run(model, phase, batchSize, valBatchSize, numEpochs, trainData, 
     -- After each epoch, evaluate on validation if phase is train
     if not isForwardOnly then
       _G.logger:info('Evaluating model on validation data')
-      evaluateModel(model, valData, valBatchSize, beamSize, modelDir, epoch, true)
+      local ppl = evaluateModel(model, valData, valBatchSize, beamSize, modelDir, epoch, true)
+      local learningRateOld = model.optim.args.learning_rate
+      model.optim:updateLearningRate(ppl, -math.huge)
+      local learningRate = model.optim.args.learning_rate
+      if learningRate < learningRateOld then
+        _G.logger:info('Decay learning rate to %f', learningRate)
+      end
       saveModel(modelDir, model, trainData)
     else -- isForwardOnly == true
       _G.logger:info('Epoch ends. Number of samples: %d.', numSamples)
