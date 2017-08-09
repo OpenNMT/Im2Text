@@ -163,6 +163,7 @@ local function run(model, phase, batchSize, valBatchSize, numEpochs, trainData, 
       end
       local actualBatchSize = trainBatch[1]:size(1)
       local stepLoss, stats = model:step(trainBatch, isForwardOnly, beamSize) -- do one step
+      collectgarbage()
       if not isForwardOnly then
         _G.logger:info('step perplexity: %f', math.exp(stepLoss/stats[1]))
       end
@@ -264,7 +265,7 @@ local function main()
   end
   local trainData = DataLoader(opt.image_dir, opt.data_path, opt.label_path, opt.max_image_height, opt.max_image_width, opt.max_num_tokens)
   local dataPath = paths.concat(opt.model_dir, string.format('model_%d-data', model.numSteps or 0))
-  if opt.load_model and paths.filep(dataPath) then
+  if opt.load_model and paths.filep(dataPath) and opt.phase == 'train' then
     _G.logger:info('Loading data state from %s', dataPath)
     trainData:load(dataPath)
   end

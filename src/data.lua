@@ -100,28 +100,36 @@ function DataLoader:nextBatch(batchSize)
           self.buffer[imageWidth][imageHeight] = {}
         end
         table.insert(self.buffer[imageWidth][imageHeight], {imageData, tokenIds, imagePath})
-        if #self.buffer[imageWidth][imageHeight] == batchSize then
+        if #self.buffer[imageWidth][imageHeight] >= batchSize then
           local images = torch.Tensor(batchSize, 1, imageHeight, imageWidth)
           local maxTargetLength = -math.huge
           local imagePaths = {}
-          for i = 1, #self.buffer[imageWidth][imageHeight] do
-            imagePaths[i] = self.buffer[imageWidth][imageHeight][i][3]
-            images[i]:copy(self.buffer[imageWidth][imageHeight][i][1])
-            maxTargetLength = math.max(maxTargetLength, #self.buffer[imageWidth][imageHeight][i][2])
+          local offset = #self.buffer[imageWidth][imageHeight] - batchSize
+          for i = 1, batchSize do
+            imagePaths[i] = self.buffer[imageWidth][imageHeight][i+offset][3]
+            images[i]:copy(self.buffer[imageWidth][imageHeight][i+offset][1])
+            maxTargetLength = math.max(maxTargetLength, #self.buffer[imageWidth][imageHeight][i+offset][2])
           end
           -- targetInput: used as input to decoder. SOS, tokenId1, tokenId2, ..., tokenIdN
           local targetInput = torch.IntTensor(batchSize, maxTargetLength-1):fill(onmt.Constants.PAD)
           -- targetOutput: used for comparing against decoder's output. tokenId1, tokenId2, ..., tokenIdN, EOS
           local targetOutput = torch.IntTensor(batchSize, maxTargetLength-1):fill(onmt.Constants.PAD)
           local numNonzeros = 0
-          for i = 1, #self.buffer[imageWidth][imageHeight] do
-            numNonzeros = numNonzeros + #self.buffer[imageWidth][imageHeight][i][2] - 1
-            for j = 1, #self.buffer[imageWidth][imageHeight][i][2]-1 do
-              targetInput[i][j] = self.buffer[imageWidth][imageHeight][i][2][j]
-              targetOutput[i][j] = self.buffer[imageWidth][imageHeight][i][2][j+1]
+          for i = 1, batchSize do
+            numNonzeros = numNonzeros + #self.buffer[imageWidth][imageHeight][i+offset][2] - 1
+            for j = 1, #self.buffer[imageWidth][imageHeight][i+offset][2]-1 do
+              targetInput[i][j] = self.buffer[imageWidth][imageHeight][i+offset][2][j]
+              targetOutput[i][j] = self.buffer[imageWidth][imageHeight][i+offset][2][j+1]
             end
           end
-          self.buffer[imageWidth][imageHeight] = nil
+          if offset == 0 then
+            self.buffer[imageWidth][imageHeight] = nil
+          else
+            for i = 1, batchSize do
+              self.buffer[imageWidth][imageHeight][i+offset] = nil
+            end
+          end
+
           do return {images, targetInput, targetOutput, numNonzeros, imagePaths} end
         end
       else --  not (imageHeight <= self.maxImageHeight and imageWidth <= self.maxImageWidth)
@@ -146,26 +154,33 @@ function DataLoader:nextBatch(batchSize)
     imageWidth = next(self.buffer, imageWidth)
   end
   local imageHeight = next(self.buffer[imageWidth], nil)
-  local actualBatchSize = #self.buffer[imageWidth][imageHeight] -- actual batch size is smaller than batchSize
+  local actualBatchSize = math.min(batchSize, #self.buffer[imageWidth][imageHeight])
+  local offset = math.max(0, #self.buffer[imageWidth][imageHeight]-batchSize)
   local images = torch.Tensor(actualBatchSize, 1, imageHeight, imageWidth)
   local maxTargetLength = -math.huge
   local imagePaths = {}
-  for i = 1, #self.buffer[imageWidth][imageHeight] do
-    imagePaths[i] = self.buffer[imageWidth][imageHeight][i][3]
-    images[i]:copy(self.buffer[imageWidth][imageHeight][i][1])
-    maxTargetLength = math.max(maxTargetLength, #self.buffer[imageWidth][imageHeight][i][2])
+  for i = 1, actualBatchSize do
+    imagePaths[i] = self.buffer[imageWidth][imageHeight][i+offset][3]
+    images[i]:copy(self.buffer[imageWidth][imageHeight][i+offset][1])
+    maxTargetLength = math.max(maxTargetLength, #self.buffer[imageWidth][imageHeight][i+offset][2])
   end
   local targetInput = torch.IntTensor(actualBatchSize, maxTargetLength-1):fill(onmt.Constants.PAD)
   local targetOutput = torch.IntTensor(actualBatchSize, maxTargetLength-1):fill(onmt.Constants.PAD)
   local numNonzeros = 0
-  for i = 1, #self.buffer[imageWidth][imageHeight] do
-    numNonzeros = numNonzeros + #self.buffer[imageWidth][imageHeight][i][2] - 1
-    for j = 1, #self.buffer[imageWidth][imageHeight][i][2]-1 do
-      targetInput[i][j] = self.buffer[imageWidth][imageHeight][i][2][j]
-      targetOutput[i][j] = self.buffer[imageWidth][imageHeight][i][2][j+1]
+  for i = 1, actualBatchSize do
+    numNonzeros = numNonzeros + #self.buffer[imageWidth][imageHeight][i+offset][2] - 1
+    for j = 1, #self.buffer[imageWidth][imageHeight][i+offset][2]-1 do
+      targetInput[i][j] = self.buffer[imageWidth][imageHeight][i+offset][2][j]
+      targetOutput[i][j] = self.buffer[imageWidth][imageHeight][i+offset][2][j+1]
     end
   end
-  self.buffer[imageWidth][imageHeight] = nil
+  if offset == 0 then
+    self.buffer[imageWidth][imageHeight] = nil
+  else
+    for i = 1, actualBatchSize do
+      self.buffer[imageWidth][imageHeight][i+offset] = nil
+    end
+  end
   return {images, targetInput, targetOutput, numNonzeros, imagePaths}
 end
 

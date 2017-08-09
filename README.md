@@ -16,7 +16,7 @@ The paper (http://arxiv.org/pdf/1609.04938v1.pdf) provides more technical detail
 
 ## Installation
 
-Im2Text is built on top of <a href="https://opennmt.github.io/">OpenNMT</a>. There is no need to install it, since it's already packed in this project. It also depends on `tds`, `class`, `cudnn`, `cutorch` and `paths`. Currently we only support **GPU**.
+Im2Text is built on top of <a href="https://opennmt.github.io/">OpenNMT</a>, which is packed in this project. It also depends on `tds`, `class`, `cudnn`, `cutorch` and `paths`. Currently we only support **GPU**.
 
 
 ## Quick Start
